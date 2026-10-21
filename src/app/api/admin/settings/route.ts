@@ -1,0 +1,100 @@
+import { NextRequest, NextResponse } from "next/server";
+import { getDB, getSiteSettings } from "@/lib/db";
+
+export const runtime = "edge";
+
+export async function GET() {
+  try {
+    const settings = await getSiteSettings();
+    return NextResponse.json({ settings });
+  } catch (error) {
+    return NextResponse.json({ error: "Failed to fetch settings" }, { status: 500 });
+  }
+}
+
+export async function PUT(req: NextRequest) {
+  try {
+    const body = await req.json();
+    const db = getDB();
+
+    const current = await getSiteSettings();
+
+    const updated = {
+      site_title: body.site_title ?? current.site_title,
+      site_tagline: body.site_tagline ?? current.site_tagline,
+      site_description: body.site_description ?? current.site_description,
+      logo_url: body.logo_url ?? current.logo_url,
+      header_nav_json: body.header_nav_json ? JSON.stringify(body.header_nav_json) : current.header_nav_json,
+      footer_nav_json: body.footer_nav_json ? JSON.stringify(body.footer_nav_json) : current.footer_nav_json,
+      header_code: body.header_code ?? current.header_code,
+      footer_code: body.footer_code ?? current.footer_code,
+      facebook_pixel_id: body.facebook_pixel_id ?? current.facebook_pixel_id,
+      facebook_access_token: body.facebook_access_token ?? current.facebook_access_token,
+      facebook_test_event_code: body.facebook_test_event_code ?? current.facebook_test_event_code,
+      facebook_tracking_enabled: typeof body.facebook_tracking_enabled !== "undefined" ? (body.facebook_tracking_enabled ? 1 : 0) : current.facebook_tracking_enabled,
+      ai_enabled: typeof body.ai_enabled !== "undefined" ? (body.ai_enabled ? 1 : 0) : current.ai_enabled,
+      ai_provider: body.ai_provider ?? current.ai_provider,
+      ai_model: body.ai_model ?? current.ai_model,
+      ai_api_key: body.ai_api_key ?? current.ai_api_key,
+      ai_system_prompt: body.ai_system_prompt ?? current.ai_system_prompt,
+      homepage_json: body.homepage_json !== undefined ? (typeof body.homepage_json === "string" ? body.homepage_json : JSON.stringify(body.homepage_json)) : ((current as any)?.homepage_json || null),
+      chatbot_faqs_json: body.chatbot_faqs_json !== undefined ? (typeof body.chatbot_faqs_json === "string" ? body.chatbot_faqs_json : JSON.stringify(body.chatbot_faqs_json)) : ((current as any)?.chatbot_faqs_json || null),
+      whatsapp_number: body.whatsapp_number !== undefined ? body.whatsapp_number : ((current as any)?.whatsapp_number || "")
+    };
+
+    await db
+      .prepare(`
+        UPDATE settings 
+        SET site_title = ?,
+            site_tagline = ?,
+            site_description = ?,
+            logo_url = ?,
+            header_nav_json = ?,
+            footer_nav_json = ?,
+            header_code = ?,
+            footer_code = ?,
+            facebook_pixel_id = ?,
+            facebook_access_token = ?,
+            facebook_test_event_code = ?,
+            facebook_tracking_enabled = ?,
+            ai_enabled = ?,
+            ai_provider = ?,
+            ai_model = ?,
+            ai_api_key = ?,
+            ai_system_prompt = ?,
+            homepage_json = ?,
+            chatbot_faqs_json = ?,
+            whatsapp_number = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = 'general'
+      `)
+      .bind(
+        updated.site_title,
+        updated.site_tagline,
+        updated.site_description,
+        updated.logo_url,
+        updated.header_nav_json,
+        updated.footer_nav_json,
+        updated.header_code,
+        updated.footer_code,
+        updated.facebook_pixel_id,
+        updated.facebook_access_token,
+        updated.facebook_test_event_code,
+        updated.facebook_tracking_enabled,
+        updated.ai_enabled,
+        updated.ai_provider,
+        updated.ai_model,
+        updated.ai_api_key,
+        updated.ai_system_prompt,
+        updated.homepage_json,
+        updated.chatbot_faqs_json,
+        updated.whatsapp_number
+      )
+      .run();
+
+    return NextResponse.json({ success: true, message: "সেটিংস সফলভাবে সংরক্ষিত হয়েছে!", settings: updated });
+  } catch (error) {
+    console.error("Settings update error:", error);
+    return NextResponse.json({ error: "Failed to update settings" }, { status: 500 });
+  }
+}

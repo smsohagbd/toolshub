@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="450" viewBox="0 0 800 450" fill="none">
+  <rect width="800" height="450" fill="#1e1b4b"/>
+  <circle cx="400" cy="225" r="160" fill="url(#paint0_radial)" fill-opacity="0.4"/>
+  <path d="M400 160L425 210H475L435 240L450 290L400 260L350 290L365 240L325 210H375L400 160Z" fill="#818cf8"/>
+  <text x="400" y="340" fill="#e0e7ff" font-family="system-ui, sans-serif" font-size="28" font-weight="bold" text-anchor="middle">ToolsHub BD</text>
+  <defs>
+    <radialGradient id="paint0_radial" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(400 225) rotate(90) scale(160)">
+      <stop stop-color="#6366f1"/>
+      <stop offset="1" stop-color="#1e1b4b" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+</svg>

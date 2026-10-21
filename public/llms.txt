@@ -1,0 +1,12 @@
+# ToolsHub BD
+
+> ToolsHub BD is a premier digital software, scripts, and automation tools marketplace in Bangladesh. Customers can purchase validated social automation tools, SEO boosters, and web scripts with instant delivery.
+
+## Products & Tools
+- [Mouza Map](https://tootls.pages.dev/tools/mouza-map): Complete Mouza Map geographic and land survey digital utility.
+- [All Tools Catalog](https://tootls.pages.dev/#tools): Complete list of automated digital tools and software.
+
+## Navigation & Resources
+- [Home](https://tootls.pages.dev/): Main storefront and overview.
+- [Track Order](https://tootls.pages.dev/track-order): Instant order status and license key lookup.
+- [Sitemap](https://tootls.pages.dev/sitemap.xml): Machine-readable XML sitemap.

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://agenticresourcediscovery.org/schema/v1/ai-catalog.json",
+  "schema_version": "1.0.0",
+  "name": "ToolsHub BD",
+  "description": "Premium Digital Tools, Scripts & Social Automation Software in Bangladesh",
+  "url": "https://tootls.pages.dev",
+  "provider": {
+    "name": "ToolsHub BD",
+    "url": "https://tootls.pages.dev"
+  },
+  "catalog": [
+    {
+      "id": "mouza-map",
+      "name": "Mouza Map",
+      "description": "Complete Mouza Map geographic and land survey digital utility.",
+      "url": "https://tootls.pages.dev/tools/mouza-map",
+      "type": "software",
+      "currency": "BDT",
+      "pricing": {
+        "price": 199,
+        "type": "one_time"
+      }
+    }
+  ]
+}

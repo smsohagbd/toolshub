@@ -10,7 +10,8 @@
 
 # Cloudflare Pages / Worker build output
 /dist/
-/.vercel/
+.wrangler/
+.vercel/
 
 # Environment files
 .env

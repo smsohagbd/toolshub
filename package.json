@@ -7,9 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "pages:build": "npx @cloudflare/next-on-pages",
-    "preview": "npm run pages:build && wrangler pages dev .vercel/output/static --compatibility-flag=nodejs_compat",
-    "deploy": "npm run pages:build && wrangler pages deploy .vercel/output/static --project-name=tootls",
+    "pages:build": "npm run build && node scripts/build-cloudflare.mjs",
+    "preview": "npm run pages:build && wrangler pages dev dist --compatibility-flag=nodejs_compat",
+    "deploy": "npm run pages:build && wrangler pages deploy dist --project-name=tootls",
     "d1:init": "wrangler d1 execute tools --local --file=./schema.sql",
     "d1:init:prod": "wrangler d1 execute tools --remote --file=./schema.sql"
   },

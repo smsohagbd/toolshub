@@ -41,7 +41,21 @@ export default function AdminHeaderFooterPage() {
 
         try {
           if (s.header_nav_json) {
-            setNavItems(JSON.parse(s.header_nav_json));
+            const parsed = JSON.parse(s.header_nav_json);
+            if (Array.isArray(parsed)) {
+              setNavItems(
+                parsed.map((item: any) => ({
+                  ...item,
+                  url:
+                    item.url === "/#contact" ||
+                    item.url === "#contact" ||
+                    item.url === "/#contack" ||
+                    item.url === "#contack"
+                      ? "/contact"
+                      : item.url
+                }))
+              );
+            }
           }
         } catch (e) {}
 

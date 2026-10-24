@@ -48,7 +48,7 @@ function initializeLocalMock() {
         { label: "টুলস", url: "/#tools" },
         { label: "ফিচার", url: "/#features" },
         { label: "অর্ডার ট্র্যাকিং", url: "/track-order" },
-        { label: "যোগাযোগ", url: "/#contact" }
+        { label: "যোগাযোগ", url: "/contact" }
       ]),
       footer_nav_json: JSON.stringify({
         copyright: "© 2026 ToolsHub BD. সর্বস্বত্ব সংরক্ষিত।",
@@ -57,6 +57,9 @@ function initializeLocalMock() {
         telegram_link: "https://t.me/sohag",
         facebook_link: "https://facebook.com/sohag"
       }),
+      whatsapp_number: "+8801700000000",
+      telegram_channel: "toolshubbd",
+      contact_page_json: "",
       header_code: "<!-- Header Custom Scripts / GTM -->",
       footer_code: "<!-- Footer Custom Scripts -->",
       facebook_pixel_id: "",
@@ -491,7 +494,32 @@ export function getDB(): D1Database {
 
           // Settings update
           if (lower.startsWith("update settings")) {
-            // merge updated fields
+            if (localStore?.settings && boundParams.length >= 17) {
+              const s = localStore.settings;
+              if (boundParams[0] !== undefined) s.site_title = boundParams[0];
+              if (boundParams[1] !== undefined) s.site_tagline = boundParams[1];
+              if (boundParams[2] !== undefined) s.site_description = boundParams[2];
+              if (boundParams[3] !== undefined) s.logo_url = boundParams[3];
+              if (boundParams[4] !== undefined) s.header_nav_json = boundParams[4];
+              if (boundParams[5] !== undefined) s.footer_nav_json = boundParams[5];
+              if (boundParams[6] !== undefined) s.header_code = boundParams[6];
+              if (boundParams[7] !== undefined) s.footer_code = boundParams[7];
+              if (boundParams[8] !== undefined) s.facebook_pixel_id = boundParams[8];
+              if (boundParams[9] !== undefined) s.facebook_access_token = boundParams[9];
+              if (boundParams[10] !== undefined) s.facebook_test_event_code = boundParams[10];
+              if (boundParams[11] !== undefined) s.facebook_tracking_enabled = boundParams[11];
+              if (boundParams[12] !== undefined) s.ai_enabled = boundParams[12];
+              if (boundParams[13] !== undefined) s.ai_provider = boundParams[13];
+              if (boundParams[14] !== undefined) s.ai_model = boundParams[14];
+              if (boundParams[15] !== undefined) s.ai_api_key = boundParams[15];
+              if (boundParams[16] !== undefined) s.ai_system_prompt = boundParams[16];
+              if (boundParams[17] !== undefined) (s as any).homepage_json = boundParams[17];
+              if (boundParams[18] !== undefined) (s as any).chatbot_faqs_json = boundParams[18];
+              if (boundParams[19] !== undefined) (s as any).whatsapp_number = boundParams[19];
+              if (boundParams[20] !== undefined) (s as any).telegram_channel = boundParams[20];
+              if (boundParams[21] !== undefined) (s as any).contact_page_json = boundParams[21];
+              (s as any).updated_at = new Date().toISOString();
+            }
             return { success: true, meta: { changes: 1 } };
           }
 

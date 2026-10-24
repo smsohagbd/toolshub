@@ -25,7 +25,15 @@ export function Navbar({ siteTitle = "ToolsHub BD", logoUrl, navItems = [] }: Na
     { label: "যোগাযোগ", url: "/contact" }
   ];
 
-  const links = navItems.length > 0 ? navItems : defaultNav;
+  const rawLinks = navItems.length > 0 ? navItems : defaultNav;
+  const links = rawLinks.map((item) => {
+    const isContact =
+      item.url === "/#contact" ||
+      item.url === "#contact" ||
+      item.url === "/#contack" ||
+      item.url === "#contack";
+    return isContact ? { ...item, url: "/contact" } : item;
+  });
 
   useEffect(() => {
     async function checkAuth() {

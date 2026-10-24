@@ -14,12 +14,7 @@ import {
 } from "lucide-react";
 import type { Metadata } from "next";
 
-export async function generateStaticParams() {
-  const products = await getProducts();
-  return products.map((p: any) => ({
-    slug: p.slug,
-  }));
-}
+export const runtime = "edge";
 
 interface ToolPageProps {
   params: Promise<{ slug: string }>;
@@ -65,7 +60,7 @@ export default async function ToolDetailPage({ params }: ToolPageProps) {
   const currencySymbol = settings?.currency_symbol || "৳";
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-12 space-y-8">
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-12 space-y-8 pb-24 sm:pb-12">
       {/* 1. Primary Page Header with H1 for SEO & Accessibility */}
       <header className="space-y-3 pb-2 border-b border-slate-100 dark:border-slate-800">
         <div className="flex items-center gap-2 text-xs">
@@ -229,6 +224,30 @@ export default async function ToolDetailPage({ params }: ToolPageProps) {
 
       {/* Dynamic Related Products */}
       <RelatedProducts currentProductId={product.id} currencySymbol={currencySymbol} />
+
+      {/* Mobile Sticky Buy Now CTA Bar */}
+      <div className="sm:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-t border-slate-200 dark:border-slate-800 px-4 py-3 shadow-[0_-8px_25px_rgba(0,0,0,0.12)] flex items-center justify-between gap-3">
+        <div>
+          <span className="text-[11px] text-slate-500 dark:text-slate-400 block font-medium">অফার মূল্য:</span>
+          <div className="flex items-baseline gap-1.5">
+            <span className="text-xl font-black text-indigo-600 dark:text-indigo-400">
+              {currencySymbol}{product.sale_price || product.price}
+            </span>
+            {product.sale_price && (
+              <span className="text-xs text-slate-400 line-through">
+                {currencySymbol}{product.price}
+              </span>
+            )}
+          </div>
+        </div>
+        <Link
+          href={`/checkout/${product.slug}`}
+          className="flex-1 py-3 px-5 rounded-2xl bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white font-extrabold text-sm text-center shadow-lg shadow-indigo-600/30 flex items-center justify-center gap-1.5 transition-all"
+        >
+          <span>এখনই কিনুন</span>
+          <ArrowRight className="w-4 h-4" />
+        </Link>
+      </div>
     </div>
   );
 }

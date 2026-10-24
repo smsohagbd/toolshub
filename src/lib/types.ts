@@ -32,7 +32,52 @@ export interface SiteSettings {
   ai_system_prompt: string;
   
   admin_username: string;
+  whatsapp_number?: string;
+  telegram_channel?: string;
+  homepage_json?: string;
+  chatbot_faqs_json?: string;
+  contact_page_json?: string;
   updated_at?: string;
+}
+
+export interface ContactPageData {
+  badge_text: string;
+  title: string;
+  subtitle: string;
+  notice_banner?: {
+    enabled: boolean;
+    text: string;
+    type: "info" | "warning" | "success";
+  };
+  whatsapp: {
+    enabled: boolean;
+    title: string;
+    description: string;
+    number: string;
+    button_text: string;
+    prefill_text?: string;
+  };
+  telegram: {
+    enabled: boolean;
+    title: string;
+    description: string;
+    channel: string;
+    button_text: string;
+  };
+  support_info: {
+    email: string;
+    phone: string;
+    hours: string;
+    address: string;
+  };
+  ticket_section: {
+    guest_title: string;
+    guest_desc: string;
+    guest_btn_text: string;
+    user_title: string;
+    response_guarantee: string;
+  };
+  faqs?: Array<{ q: string; a: string }>;
 }
 
 export interface NavItem {

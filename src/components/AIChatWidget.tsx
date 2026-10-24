@@ -129,6 +129,8 @@ export function AIChatWidget() {
     }
   ]);
 
+  const [userEmail, setUserEmail] = useState<string | null>(null);
+
   // Initialize Session ID & Load Persisted Chat History
   useEffect(() => {
     // 1. Session ID (Persisted in localStorage so reloads keep identity)
@@ -156,8 +158,15 @@ export function AIChatWidget() {
       }
     } catch {}
 
-    // 3. Fetch server configuration & server-persisted history
-    fetch(`/api/chat?session_id=${encodeURIComponent(sid)}`)
+    // 3. Fetch user auth status & server-persisted history for logged-in user or session
+    fetch("/api/auth/me")
+      .then((r) => r.json())
+      .then((auth) => {
+        const email = auth?.authenticated && auth?.user?.email ? auth.user.email : null;
+        if (email) setUserEmail(email);
+        const query = email ? `user_email=${encodeURIComponent(email)}` : `session_id=${encodeURIComponent(sid)}`;
+        return fetch(`/api/chat?${query}`);
+      })
       .then((r) => r.json())
       .then((d) => {
         if (d && Array.isArray(d.faqs) && d.faqs.length > 0) {
@@ -230,6 +239,7 @@ export function AIChatWidget() {
         body: JSON.stringify({
           message: text,
           session_id: sessionId,
+          user_email: userEmail,
           history: historyToSend
         })
       });
@@ -266,20 +276,20 @@ export function AIChatWidget() {
   };
 
   return (
-    <div className="fixed bottom-5 right-5 z-50">
+    <div className="fixed bottom-20 sm:bottom-5 right-4 sm:right-5 z-50">
       {/* Floating Toggle Button */}
       {!isOpen && (
         <button
           onClick={() => setIsOpen(true)}
           className="group relative flex items-center gap-2.5 px-4 py-3 bg-gradient-to-r from-indigo-600 to-indigo-500 hover:from-indigo-700 hover:to-indigo-600 text-white rounded-full shadow-lg shadow-indigo-500/25 transition-all transform hover:scale-105 active:scale-95"
-          aria-label="Open AI Chatbot"
+          aria-label="Open Customer Support Chat"
         >
           <span className="relative flex h-3 w-3">
             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
             <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
           </span>
           <Bot className="w-5 h-5" />
-          <span className="text-sm font-semibold tracking-wide pr-1">AI হেল্প ডেস্ক</span>
+          <span className="text-sm font-semibold tracking-wide pr-1">💬 সহায়তা ও চ্যাট</span>
         </button>
       )}
 
@@ -294,12 +304,12 @@ export function AIChatWidget() {
               </div>
               <div>
                 <h3 className="font-bold text-sm leading-tight flex items-center gap-1.5">
-                  AI কাস্টমার সহকারী
+                  ToolsHub কাস্টমার সাপোর্ট
                   <Sparkles className="w-3.5 h-3.5 text-amber-300" />
                 </h3>
                 <span className="text-[11px] text-indigo-200 flex items-center gap-1">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
-                  অনলাইন ২৪/৭
+                  অনলাইন ২৪/৭ সহায়তা
                 </span>
               </div>
             </div>

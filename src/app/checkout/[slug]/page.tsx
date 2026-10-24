@@ -1,11 +1,7 @@
 import { CheckoutClient } from "./CheckoutClient";
-import { getProducts } from "@/lib/db";
 
 export async function generateStaticParams() {
-  const products = await getProducts();
-  return products.map((p: any) => ({
-    slug: p.slug,
-  }));
+  return [{ slug: "template" }];
 }
 
 export default async function CheckoutPage({

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { revalidatePath } from "next/cache";
 import { getDB } from "@/lib/db";
 
 export const runtime = "edge";
@@ -82,6 +83,13 @@ export async function POST(req: NextRequest) {
         status || "published"
       )
       .run();
+
+    try {
+      revalidatePath("/");
+      revalidatePath("/api/products");
+      revalidatePath(`/tools/${slug.trim().toLowerCase()}`);
+      revalidatePath(`/checkout/${slug.trim().toLowerCase()}`);
+    } catch (e) {}
 
     return NextResponse.json({ success: true, id, message: "প্রোডাক্ট সফলভাবে যুক্ত হয়েছে!" });
   } catch (error) {
@@ -174,6 +182,13 @@ export async function PUT(req: NextRequest) {
       )
       .run();
 
+    try {
+      revalidatePath("/");
+      revalidatePath("/api/products");
+      revalidatePath(`/tools/${slug.trim().toLowerCase()}`);
+      revalidatePath(`/checkout/${slug.trim().toLowerCase()}`);
+    } catch (e) {}
+
     return NextResponse.json({ success: true, message: "প্রোডাক্ট সফলভাবে আপডেট করা হয়েছে!" });
   } catch (error) {
     console.error("Product update error:", error);
@@ -188,6 +203,8 @@ export async function DELETE(req: NextRequest) {
     if (!id) return NextResponse.json({ error: "ID is required" }, { status: 400 });
 
     const db = getDB();
+    const prod = await db.prepare("SELECT slug FROM products WHERE id = ?").bind(id).first<{ slug: string }>();
+
     try {
       await db.prepare("DELETE FROM order_messages WHERE order_id IN (SELECT id FROM orders WHERE product_id = ?) OR order_number IN (SELECT order_number FROM orders WHERE product_id = ?)").bind(id, id).run();
     } catch(e) {}
@@ -201,6 +218,15 @@ export async function DELETE(req: NextRequest) {
       await db.prepare("DELETE FROM subscriptions WHERE product_id = ?").bind(id).run();
     } catch(e) {}
     await db.prepare("DELETE FROM products WHERE id = ?").bind(id).run();
+
+    try {
+      revalidatePath("/");
+      revalidatePath("/api/products");
+      if (prod?.slug) {
+        revalidatePath(`/tools/${prod.slug}`);
+        revalidatePath(`/checkout/${prod.slug}`);
+      }
+    } catch (e) {}
 
     return NextResponse.json({ success: true, message: "প্রোডাক্ট সফলভাবে মুছে ফেলা হয়েছে" });
   } catch (error) {

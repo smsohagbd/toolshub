@@ -296,3 +296,234 @@ export function getOrderCancelledEmailHtml(order: any, reason?: string) {
   </html>
   `;
 }
+
+export function getAdminNewOrderAlertEmailHtml(order: any) {
+  return `
+  <!DOCTYPE html>
+  <html>
+  <head>
+    <meta charset="utf-8">
+    <style>
+      body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #f1f5f9; margin: 0; padding: 20px; color: #0f172a; }
+      .container { max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 16px; overflow: hidden; border: 1px solid #cbd5e1; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }
+      .header { background: linear-gradient(135deg, #4f46e5, #4338ca); padding: 28px 24px; text-align: center; color: #ffffff; }
+      .badge { display: inline-block; background: #fbbf24; color: #78350f; font-weight: bold; font-size: 12px; padding: 4px 12px; border-radius: 9999px; margin-bottom: 8px; text-transform: uppercase; }
+      .content { padding: 28px 24px; line-height: 1.6; }
+      .box { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 18px; margin: 18px 0; }
+      .row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px dashed #e2e8f0; font-size: 14px; }
+      .row:last-child { border-bottom: none; }
+      .btn { display: inline-block; background: #4f46e5; color: #ffffff !important; text-decoration: none; padding: 14px 28px; border-radius: 10px; font-weight: bold; font-size: 14px; }
+      .footer { background: #f8fafc; padding: 16px; text-align: center; font-size: 12px; color: #64748b; border-top: 1px solid #e2e8f0; }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="header">
+        <span class="badge">🔔 নতুন অর্ডার অ্যালার্ট</span>
+        <h1 style="margin:0;font-size:22px;">নতুন অর্ডার গ্রহণ করা হয়েছে!</h1>
+        <p style="margin:6px 0 0 0;font-size:14px;opacity:0.9;">অর্ডার নম্বর: #${order.order_number}</p>
+      </div>
+      <div class="content">
+        <p style="margin-top:0;font-size:15px;">অ্যাডমিন মহোদয়,</p>
+        <p>ToolsHub BD ওয়েবসাইটে একজন গ্রাহক নতুন একটি অর্ডার প্লেস করেছেন। বিস্তারিত তথ্য নিচে দেওয়া হলো:</p>
+
+        <div class="box">
+          <div class="row">
+            <span style="color:#64748b;">প্রোডাক্ট:</span>
+            <strong style="color:#0f172a;">${order.product_title}</strong>
+          </div>
+          <div class="row">
+            <span style="color:#64748b;">মূল্য:</span>
+            <strong style="color:#10b981;font-size:16px;">৳${order.amount}</strong>
+          </div>
+          <div class="row">
+            <span style="color:#64748b;">গ্রাহকের নাম:</span>
+            <strong style="color:#0f172a;">${order.customer_name}</strong>
+          </div>
+          <div class="row">
+            <span style="color:#64748b;">ইমেইল:</span>
+            <strong style="color:#0f172a;">${order.customer_email}</strong>
+          </div>
+          <div class="row">
+            <span style="color:#64748b;">ফোন নম্বর:</span>
+            <strong style="color:#0f172a;">${order.customer_phone || 'N/A'}</strong>
+          </div>
+          <div class="row">
+            <span style="color:#64748b;">পেমেন্ট মেথড:</span>
+            <strong style="color:#4f46e5;text-transform:uppercase;">${order.payment_method}</strong>
+          </div>
+          <div class="row">
+            <span style="color:#64748b;">প্রেরক নম্বর:</span>
+            <strong style="color:#0f172a;">${order.sender_number || 'N/A'}</strong>
+          </div>
+          <div class="row">
+            <span style="color:#64748b;">TrxID:</span>
+            <code style="background:#e0e7ff;padding:2px 6px;border-radius:4px;color:#3730a3;font-weight:bold;">${order.transaction_id || 'N/A'}</code>
+          </div>
+          ${order.coupon_code ? `
+          <div class="row">
+            <span style="color:#64748b;">কুপন কোড:</span>
+            <strong style="color:#059669;">${order.coupon_code} (-৳${order.discount_amount || 0})</strong>
+          </div>
+          ` : ''}
+        </div>
+
+        <div style="text-align: center; margin: 24px 0;">
+          <a href="https://tootls.pages.dev/admin/orders" class="btn">
+            অ্যাডমিন প্যানেলে অর্ডার ভিউ ও ভেরিফাই করুন →
+          </a>
+        </div>
+      </div>
+      <div class="footer">
+        ToolsHub BD Automated Server Notification
+      </div>
+    </div>
+  </body>
+  </html>
+  `;
+}
+
+export function getPasswordResetOtpEmailHtml(otp: string, name?: string) {
+  return `
+  <!DOCTYPE html>
+  <html>
+  <head>
+    <meta charset="utf-8">
+    <style>
+      body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #f8fafc; margin: 0; padding: 20px; color: #1e293b; }
+      .container { max-width: 540px; margin: 0 auto; background: #ffffff; border-radius: 16px; overflow: hidden; border: 1px solid #e2e8f0; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }
+      .header { background: linear-gradient(135deg, #4f46e5, #6366f1); padding: 32px 24px; text-align: center; color: #ffffff; }
+      .content { padding: 32px 24px; line-height: 1.6; }
+      .otp-box { background: #f0fdf4; border: 2px dashed #16a34a; border-radius: 12px; padding: 20px; text-align: center; margin: 24px 0; }
+      .otp-code { font-family: monospace; font-size: 32px; font-weight: 800; letter-spacing: 6px; color: #15803d; }
+      .warning { font-size: 13px; color: #b45309; background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 12px; margin-top: 20px; }
+      .footer { background: #f8fafc; padding: 16px; text-align: center; font-size: 12px; color: #64748b; border-top: 1px solid #e2e8f0; }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="header">
+        <h1 style="margin:0;font-size:22px;">পাসওয়ার্ড রিসেট ওটিপি কোড</h1>
+        <p style="margin:6px 0 0 0;font-size:13px;opacity:0.9;">ToolsHub BD অ্যাকাউন্ট নিরাপত্তা</p>
+      </div>
+      <div class="content">
+        <p style="margin-top:0;">প্রিয় <strong>${name || 'গ্রাহক'}</strong>,</p>
+        <p>আপনার ToolsHub BD অ্যাকাউন্টের পাসওয়ার্ড রিসেট করার একটি অনুরোধ পাওয়া গেছে। পাসওয়ার্ড পরিবর্তনের জন্য নিচের ৬-সংখ্যার ওটিপি (OTP) কোডটি ব্যবহার করুন:</p>
+
+        <div class="otp-box">
+          <div style="font-size:12px;color:#15803d;font-weight:bold;margin-bottom:6px;text-transform:uppercase;">আপনার ওটিপি কোড</div>
+          <div class="otp-code">${otp}</div>
+          <div style="font-size:12px;color:#64748b;margin-top:6px;">(এই কোডটি আগামী ১৫ মিনিট কার্যকর থাকবে)</div>
+        </div>
+
+        <div class="warning">
+          <strong>⚠️ নিরাপত্তা সতর্কবার্তা:</strong> আপনি যদি এই অনুরোধটি না করে থাকেন, তবে অবিলম্বে এই ইমেইলটি উপেক্ষা করুন। আপনার অ্যাকাউন্ট এখনও সম্পূর্ণ নিরাপদ রয়েছে।
+        </div>
+      </div>
+      <div class="footer">
+        © 2026 ToolsHub BD. সর্বস্বত্ব সংরক্ষিত।
+      </div>
+    </div>
+  </body>
+  </html>
+  `;
+}
+
+export function getPasswordChangedSuccessEmailHtml(name?: string) {
+  return `
+  <!DOCTYPE html>
+  <html>
+  <head>
+    <meta charset="utf-8">
+    <style>
+      body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #f8fafc; margin: 0; padding: 20px; color: #1e293b; }
+      .container { max-width: 540px; margin: 0 auto; background: #ffffff; border-radius: 16px; overflow: hidden; border: 1px solid #e2e8f0; }
+      .header { background: #10b981; padding: 28px 24px; text-align: center; color: #ffffff; }
+      .content { padding: 28px 24px; line-height: 1.6; }
+      .btn { display: inline-block; background: #4f46e5; color: #ffffff !important; text-decoration: none; padding: 12px 24px; border-radius: 10px; font-weight: bold; font-size: 14px; margin-top: 16px; }
+      .footer { background: #f8fafc; padding: 16px; text-align: center; font-size: 12px; color: #64748b; border-top: 1px solid #e2e8f0; }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="header">
+        <h1 style="margin:0;font-size:20px;">✓ পাসওয়ার্ড সফলভাবে পরিবর্তিত হয়েছে</h1>
+      </div>
+      <div class="content">
+        <p>প্রিয় <strong>${name || 'গ্রাহক'}</strong>,</p>
+        <p>আপনার ToolsHub BD অ্যাকাউন্টের পাসওয়ার্ড সফলভাবে আপডেট করা হয়েছে। এখন আপনি আপনার নতুন পাসওয়ার্ড দিয়ে সিস্টেমে লগইন করতে পারেন।</p>
+        
+        <div style="text-align: center;">
+          <a href="https://tootls.pages.dev/login" class="btn">এখনই লগইন করুন</a>
+        </div>
+      </div>
+      <div class="footer">ToolsHub BD — নিরবচ্ছিন্ন নিরাপত্তা সেবা</div>
+    </div>
+  </body>
+  </html>
+  `;
+}
+
+export function getSubscriptionReminderEmailHtml(sub: any, daysLeft: number) {
+  const isExpired = daysLeft <= 0;
+  const isTomorrow = daysLeft === 1;
+  const themeColor = isExpired ? '#ef4444' : isTomorrow ? '#f59e0b' : '#4f46e5';
+
+  return `
+  <!DOCTYPE html>
+  <html>
+  <head>
+    <meta charset="utf-8">
+    <style>
+      body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #f8fafc; margin: 0; padding: 20px; color: #1e293b; }
+      .container { max-width: 580px; margin: 0 auto; background: #ffffff; border-radius: 16px; overflow: hidden; border: 1px solid #e2e8f0; }
+      .header { background: ${themeColor}; padding: 28px 24px; text-align: center; color: #ffffff; }
+      .content { padding: 28px 24px; line-height: 1.6; }
+      .box { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 16px; margin: 18px 0; }
+      .btn { display: inline-block; background: #4f46e5; color: #ffffff !important; text-decoration: none; padding: 14px 28px; border-radius: 10px; font-weight: bold; font-size: 14px; }
+      .footer { background: #f8fafc; padding: 16px; text-align: center; font-size: 12px; color: #64748b; border-top: 1px solid #e2e8f0; }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="header">
+        <h1 style="margin:0;font-size:22px;">
+          ${isExpired ? '⌛ সাবস্ক্রিপশনের মেয়াদ শেষ হয়েছে' : isTomorrow ? '🚨 জরুরি: আগামীকাল মেয়াদ শেষ হচ্ছে!' : '⚠️ সাবস্ক্রিপশন মেয়াদ সংক্রান্ত নোটিফিকেশন'}
+        </h1>
+        <p style="margin:6px 0 0 0;font-size:13px;opacity:0.9;">ToolsHub BD সাবস্ক্রিপশন আপডেট</p>
+      </div>
+      <div class="content">
+        <p>প্রিয় <strong>${sub.user_name || 'গ্রাহক'}</strong>,</p>
+        
+        ${isExpired ? `
+          <p>আপনার ক্রয়কৃত <strong>"${sub.product_title}"</strong> টুলস/সার্ভিসের সাবস্ক্রিপশন মেয়াদ আজ শেষ হয়ে গেছে। টুলসটির নিরবচ্ছিন্ন সেবা ও এক্সেস বজায় রাখতে অনুগ্রহ করে এখনই রিনিউ করুন।</p>
+        ` : isTomorrow ? `
+          <p>একটি জরুরি সতর্কবার্তা! আপনার <strong>"${sub.product_title}"</strong> সাবস্ক্রিপশনের মেয়াদ <strong>আগামীকাল</strong> শেষ হতে যাচ্ছে। নিরবচ্ছিন্ন এক্সেস নিশ্চিত করতে আজই রিনিউ করে নিন।</p>
+        ` : `
+          <p>আপনার <strong>"${sub.product_title}"</strong> সাবস্ক্রিপশনের মেয়াদ আর মাত্র <strong>৩ দিন</strong> বাকি রয়েছে। সাময়িক বিচ্ছিন্নতা এড়াতে পূর্বেই সাবস্ক্রিপশন রিনিউ করে নেওয়ার জন্য অনুরোধ করা হচ্ছে।</p>
+        `}
+
+        <div class="box">
+          <p style="margin:4px 0;"><strong>সার্ভিসের নাম:</strong> ${sub.product_title}</p>
+          <p style="margin:4px 0;"><strong>বিলিং সাইকেল:</strong> ${sub.billing_cycle || '1 Month'}</p>
+          <p style="margin:4px 0;"><strong>মেয়াদ উত্তীর্ণের তারিখ:</strong> ${new Date(sub.expiry_date).toLocaleDateString('bn-BD', { year: 'numeric', month: 'long', day: 'numeric' })}</p>
+          <p style="margin:4px 0;"><strong>স্ট্যাটাস:</strong> <span style="color:${themeColor};font-weight:bold;">${isExpired ? 'মেয়াদোত্তীর্ণ (Expired)' : `${daysLeft} দিন বাকি`}</span></p>
+        </div>
+
+        <div style="text-align: center; margin: 24px 0;">
+          <a href="https://tootls.pages.dev/dashboard" class="btn">
+            ড্যাশবোর্ড থেকে রিনিউ ও এক্সেস দেখুন →
+          </a>
+        </div>
+
+        <p style="font-size:13px;color:#64748b;">যেকোনো টেকনিক্যাল সহায়তায় আমাদের ২৪/৭ এআই চ্যাটবট বা সাপোর্ট সেন্টারে মেসেজ দিন।</p>
+      </div>
+      <div class="footer">
+        ToolsHub BD — স্মার্ট অটোমেশন ও ডিজিটাল সল্যুশনস
+      </div>
+    </div>
+  </body>
+  </html>
+  `;
+}
+

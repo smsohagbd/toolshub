@@ -3,6 +3,512 @@
  * Binds directly to Cloudflare D1 (DB) and Cloudflare R2 (BUCKET)
  */
 
+import { connect } from "cloudflare:sockets";
+
+async function sendSmtpWorker({ host, port, secure, user, pass, fromName, fromEmail, toEmail, subject, htmlBody }) {
+  const p = Number(port || 465);
+  const isTls = p === 465 || Boolean(secure);
+  
+  let socket;
+  try {
+    socket = connect(
+      { hostname: host, port: p },
+      { secureTransport: isTls ? "on" : "off", allowHalfOpen: false }
+    );
+  } catch(e) {
+    throw new Error("TCP Socket connection failed: " + (e?.message || e));
+  }
+
+  const writer = socket.writable.getWriter();
+  const reader = socket.readable.getReader();
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+
+  let buf = "";
+  const readLine = async () => {
+    while (true) {
+      const idx = buf.indexOf("\r\n");
+      if (idx !== -1) {
+        const line = buf.substring(0, idx);
+        buf = buf.substring(idx + 2);
+        return line;
+      }
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+    }
+    return buf;
+  };
+
+  const writeLine = async (str) => {
+    await writer.write(encoder.encode(str + "\r\n"));
+  };
+
+  try {
+    let line = await readLine();
+    while (line.startsWith("220-")) {
+      line = await readLine();
+    }
+    if (!line.startsWith("220")) throw new Error("SMTP greeting failed: " + line);
+
+    await writeLine("EHLO tools.pages.dev");
+    while (true) {
+      line = await readLine();
+      if (line.startsWith("250 ")) break;
+      if (!line.startsWith("250-") && !line.startsWith("250")) throw new Error("EHLO failed: " + line);
+    }
+
+    await writeLine("AUTH LOGIN");
+    line = await readLine();
+    if (!line.startsWith("334")) throw new Error("AUTH LOGIN rejected: " + line);
+
+    await writeLine(btoa(user));
+    line = await readLine();
+    if (!line.startsWith("334")) throw new Error("Username rejected: " + line);
+
+    await writeLine(btoa(pass));
+    line = await readLine();
+    if (!line.startsWith("235")) throw new Error("Password authentication failed: " + line);
+
+    await writeLine(`MAIL FROM:<${fromEmail || user}>`);
+    line = await readLine();
+    if (!line.startsWith("250")) throw new Error("MAIL FROM rejected: " + line);
+
+    await writeLine(`RCPT TO:<${toEmail}>`);
+    line = await readLine();
+    if (!line.startsWith("250")) throw new Error("RCPT TO rejected: " + line);
+
+    await writeLine("DATA");
+    line = await readLine();
+    if (!line.startsWith("354")) throw new Error("DATA command rejected: " + line);
+
+    const encodedSubject = `=?UTF-8?B?${btoa(unescape(encodeURIComponent(subject)))}?=`;
+    const emailData = [
+      `From: "${fromName || 'ToolsHub BD'}" <${fromEmail || user}>`,
+      `To: <${toEmail}>`,
+      `Subject: ${encodedSubject}`,
+      `MIME-Version: 1.0`,
+      `Content-Type: text/html; charset=UTF-8`,
+      `Content-Transfer-Encoding: 8bit`,
+      `Date: ${new Date().toUTCString()}`,
+      ``,
+      htmlBody,
+      `.`
+    ].join("\r\n");
+
+    await writeLine(emailData);
+    line = await readLine();
+    if (!line.startsWith("250")) throw new Error("Message submission rejected: " + line);
+
+    await writeLine("QUIT");
+    return { success: true, message: "ইমেইল সফলভাবে প্রেরণ করা হয়েছে।" };
+  } finally {
+    try { writer.releaseLock(); } catch(e) {}
+    try { reader.releaseLock(); } catch(e) {}
+    try { socket.close(); } catch(e) {}
+  }
+}
+
+async function triggerSmtpNotification(env, toEmail, subject, htmlBody, eventType = "order_notification") {
+  if (!env || !env.DB || !toEmail) return;
+  try {
+    const s = await env.DB.prepare(
+      "SELECT smtp_host, smtp_port, smtp_secure, smtp_user, smtp_pass, email_from_name, email_from_address, email_notifications_enabled FROM settings WHERE id = 'general'"
+    ).first();
+
+    if (!s || !s.email_notifications_enabled || !s.smtp_host || !s.smtp_user || !s.smtp_pass) {
+      return;
+    }
+
+    const logId = "eml_" + Math.random().toString(36).substring(2, 9);
+    try {
+      await sendSmtpWorker({
+        host: s.smtp_host,
+        port: s.smtp_port,
+        secure: Boolean(s.smtp_secure),
+        user: s.smtp_user,
+        pass: s.smtp_pass,
+        fromName: s.email_from_name || "ToolsHub BD",
+        fromEmail: s.email_from_address || s.smtp_user,
+        toEmail,
+        subject,
+        htmlBody
+      });
+      await env.DB.prepare("INSERT INTO email_logs (id, recipient, subject, event_type, status, created_at) VALUES (?, ?, ?, ?, 'sent', CURRENT_TIMESTAMP)")
+        .bind(logId, toEmail, subject, eventType).run();
+    } catch (err) {
+      await env.DB.prepare("INSERT INTO email_logs (id, recipient, subject, event_type, status, error_message, created_at) VALUES (?, ?, ?, ?, 'failed', ?, CURRENT_TIMESTAMP)")
+        .bind(logId, toEmail, subject, eventType, String(err.message || err)).run();
+    }
+  } catch (e) {
+    console.error("triggerSmtpNotification error:", e);
+  }
+}
+
+async function runSubscriptionReminderCron(env) {
+  if (!env || !env.DB) return { processed: 0, notifications_sent: 0, expired_count: 0 };
+  let processed = 0;
+  let sent = 0;
+  let expired = 0;
+
+  try {
+    const sRes = await env.DB.prepare("SELECT * FROM subscriptions WHERE status = 'active'").all();
+    const subs = sRes.results || [];
+    processed = subs.length;
+    const now = Date.now();
+    const todayDateStr = new Date().toISOString().slice(0, 10);
+
+    for (const sub of subs) {
+      const expTime = new Date(sub.expiry_date).getTime();
+      const diffMs = expTime - now;
+      const daysLeft = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+
+      if (daysLeft === 3 || daysLeft === 1) {
+        const milestone = daysLeft === 3 ? "3days" : "1day";
+        const eventType = `sub_reminder_${milestone}_${sub.id}_${todayDateStr}`;
+
+        // Prevent duplicate sending on the same day
+        const existing = await env.DB.prepare(
+          "SELECT id FROM email_logs WHERE recipient = ? AND event_type = ? LIMIT 1"
+        ).bind(sub.user_email, eventType).first();
+
+        if (!existing) {
+          const isUrgent = daysLeft === 1;
+          const subject = isUrgent
+            ? `🚨 জরুরি: আগামীকাল "${sub.product_title}" সাবস্ক্রিপশনের মেয়াদ শেষ হচ্ছে!`
+            : `⚠️ সাবস্ক্রিপশন রিমাইন্ডার: ৩ দিন পর "${sub.product_title}" এর মেয়াদ শেষ হবে`;
+
+          const themeColor = isUrgent ? "#f59e0b" : "#4f46e5";
+          const emailHtml = `
+            <div style="font-family:'Hind Siliguri',-apple-system,sans-serif;max-width:580px;margin:0 auto;padding:24px;border:1px solid #e2e8f0;border-radius:16px;background:#ffffff;color:#1e293b;">
+              <div style="background:${themeColor};padding:24px;border-radius:12px;text-align:center;color:#ffffff;">
+                <h2 style="margin:0;font-size:20px;">${isUrgent ? '🚨 জরুরি মেয়াদ উত্তীর্ণের সতর্কবার্তা' : '⚠️ সাবস্ক্রিপশন মেয়াদ রিমাইন্ডার'}</h2>
+                <p style="margin:4px 0 0 0;font-size:12px;opacity:0.9;">ToolsHub BD সাবস্ক্রিপশন সার্ভিস</p>
+              </div>
+              <div style="padding:20px 0;line-height:1.6;font-size:14px;">
+                <p>প্রিয় <strong>${sub.user_name || 'গ্রাহক'}</strong>,</p>
+                <p>${isUrgent
+                  ? `আপনার ক্রয়কৃত <strong>"${sub.product_title}"</strong> সাবস্ক্রিপশনের মেয়াদ <strong>আগামীকাল</strong> শেষ হয়ে যাবে। নিরবচ্ছিন্ন ব্যবহার নিশ্চিত করতে আজই রিনিউ করুন।`
+                  : `আপনার ক্রয়কৃত <strong>"${sub.product_title}"</strong> সাবস্ক্রিপশনের মেয়াদ আর মাত্র <strong>৩ দিন</strong> বাকি রয়েছে। সাময়িক বিচ্ছিন্নতা এড়াতে পূর্বেই রিনিউ করার অনুরোধ করা হচ্ছে।`
+                }</p>
+                
+                <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:16px;margin:16px 0;">
+                  <p style="margin:4px 0;"><strong>টুলস / সার্ভিস:</strong> ${sub.product_title}</p>
+                  <p style="margin:4px 0;"><strong>বিলিং সাইকেল:</strong> ${sub.billing_cycle || 'Monthly'}</p>
+                  <p style="margin:4px 0;"><strong>মেয়াদ উত্তীর্ণের তারিখ:</strong> ${new Date(sub.expiry_date).toLocaleDateString('bn-BD', { year: 'numeric', month: 'long', day: 'numeric' })}</p>
+                  <p style="margin:4px 0;"><strong>অবশিষ্ট দিন:</strong> <span style="color:${themeColor};font-weight:bold;">${daysLeft} দিন</span></p>
+                </div>
+
+                <div style="text-align:center;margin:24px 0;">
+                  <a href="https://tootls.pages.dev/dashboard" style="display:inline-block;padding:12px 28px;background:#4f46e5;color:#ffffff;text-decoration:none;border-radius:10px;font-weight:bold;font-size:14px;">ড্যাশবোর্ড থেকে রিনিউ করুন →</a>
+                </div>
+              </div>
+              <div style="text-align:center;border-top:1px solid #f1f5f9;padding-top:14px;font-size:11px;color:#94a3b8;">
+                ToolsHub BD — স্মার্ট অটোমেশন ও ডিজিটাল সল্যুশনস
+              </div>
+            </div>
+          `;
+
+          await triggerSmtpNotification(env, sub.user_email, subject, emailHtml, eventType);
+          sent++;
+        }
+      } else if (daysLeft <= 0) {
+        // Expired today
+        await env.DB.prepare("UPDATE subscriptions SET status = 'expired', updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(sub.id).run();
+        expired++;
+
+        const eventType = `sub_expired_${sub.id}_${todayDateStr}`;
+        const existing = await env.DB.prepare(
+          "SELECT id FROM email_logs WHERE recipient = ? AND event_type = ? LIMIT 1"
+        ).bind(sub.user_email, eventType).first();
+
+        if (!existing) {
+          const subject = `⌛ আপনার "${sub.product_title}" সাবস্ক্রিপশনের মেয়াদ শেষ হয়েছে`;
+          const emailHtml = `
+            <div style="font-family:'Hind Siliguri',-apple-system,sans-serif;max-width:580px;margin:0 auto;padding:24px;border:1px solid #e2e8f0;border-radius:16px;background:#ffffff;color:#1e293b;">
+              <div style="background:#ef4444;padding:24px;border-radius:12px;text-align:center;color:#ffffff;">
+                <h2 style="margin:0;font-size:20px;">⌛ সাবস্ক্রিপশনের মেয়াদ শেষ হয়েছে</h2>
+              </div>
+              <div style="padding:20px 0;line-height:1.6;font-size:14px;">
+                <p>প্রিয় <strong>${sub.user_name || 'গ্রাহক'}</strong>,</p>
+                <p>আপনার <strong>"${sub.product_title}"</strong> সাবস্ক্রিপশনের মেয়াদ আজ সমাপ্ত হয়েছে। পুনরায় লাইসেন্স এবং ডাউনলোড ফাইল সক্রিয় করতে আপনার ড্যাশবোর্ড থেকে রিনিউ করুন।</p>
+                <div style="text-align:center;margin:24px 0;">
+                  <a href="https://tootls.pages.dev/dashboard" style="display:inline-block;padding:12px 28px;background:#4f46e5;color:#ffffff;text-decoration:none;border-radius:10px;font-weight:bold;font-size:14px;">এখনই রিনিউ করুন →</a>
+                </div>
+              </div>
+              <div style="text-align:center;border-top:1px solid #f1f5f9;padding-top:14px;font-size:11px;color:#94a3b8;">ToolsHub BD</div>
+            </div>
+          `;
+          await triggerSmtpNotification(env, sub.user_email, subject, emailHtml, eventType);
+          sent++;
+        }
+      }
+    }
+  } catch (err) {
+    console.error("runSubscriptionReminderCron error:", err);
+  }
+
+  return { processed, notifications_sent: sent, expired_count: expired };
+}
+
+function renderFloatingAIChatbotHtml() {
+  return `
+<!-- Floating AI Chatbot Widget -->
+<div id="ai_chat_root" style="position:fixed;bottom:20px;right:20px;z-index:999999;font-family:'Hind Siliguri',-apple-system,BlinkMacSystemFont,sans-serif;">
+  <!-- Toggle Button -->
+  <button id="ai_toggle_btn" onclick="toggleAIChat()" style="display:flex;align-items:center;gap:10px;padding:12px 20px;background:linear-gradient(135deg,#4f46e5,#6366f1);color:#ffffff;border:none;border-radius:9999px;box-shadow:0 10px 25px -5px rgba(79,70,229,0.4);cursor:pointer;font-weight:700;font-size:14px;transition:all 0.2s ease;">
+    <span style="position:relative;display:flex;width:10px;height:10px;">
+      <span style="position:absolute;display:inline-flex;width:100%;height:100%;border-radius:9999px;background:#34d399;opacity:0.75;animation:aiPing 1.5s cubic-bezier(0,0,0.2,1) infinite;"></span>
+      <span style="position:relative;display:inline-flex;width:10px;height:10px;border-radius:9999px;background:#10b981;"></span>
+    </span>
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>
+    <span>AI হেল্প ডেস্ক</span>
+  </button>
+
+  <!-- Chat Modal Window -->
+  <div id="ai_chat_modal" style="display:none;width:390px;max-width:calc(100vw - 32px);height:530px;max-height:calc(100vh - 90px);background:#ffffff;border-radius:24px;box-shadow:0 20px 40px -10px rgba(0,0,0,0.25);border:1px solid #e2e8f0;flex-direction:column;overflow:hidden;">
+    <!-- Header -->
+    <div style="padding:16px;background:linear-gradient(135deg,#4f46e5,#7c3aed);color:#ffffff;display:flex;align-items:center;justify-content:space-between;">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;">
+        <div style="width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,0.15);display:flex;align-items:center;justify-content:center;border:1px solid rgba(255,255,255,0.2);">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>
+        </div>
+        <div>
+          <div style="font-weight:700;font-size:14px;display:flex;align-items:center;gap:4px;">
+            AI কাস্টমার সহকারী <span style="color:#fde047;">✨</span>
+          </div>
+          <div style="font-size:11px;opacity:0.85;display:flex;align-items:center;gap:4px;">
+            <span style="width:6px;height:6px;border-radius:50%;background:#34d399;display:inline-block;"></span> অনলাইন ২৪/৭
+          </div>
+        </div>
+      </div>
+      <button onclick="toggleAIChat()" style="background:transparent;border:none;color:#ffffff;cursor:pointer;padding:6px;font-size:18px;line-height:1;border-radius:50%;opacity:0.85;">✕</button>
+    </div>
+
+    <!-- Message Area -->
+    <div id="ai_messages_container" style="flex:1;overflow-y:auto;padding:14px;background:#f8fafc;display:flex;flex-direction:column;gap:12px;">
+      <!-- Populated via JS -->
+    </div>
+
+    <!-- Quick FAQs Suggestion Bar -->
+    <div id="ai_quick_bar" style="padding:8px 12px;background:#ffffff;border-top:1px solid #f1f5f9;display:flex;gap:6px;overflow-x:auto;white-space:nowrap;">
+      <button class="ai-faq-btn" onclick="sendFaqMsg('টুলস কীভাবে ডাউনলোড করব?')">টুলস কীভাবে ডাউনলোড করব?</button>
+      <button class="ai-faq-btn" onclick="sendFaqMsg('বিকাশ বা নগদে কীভাবে কিনব?')">বিকাশ বা নগদে কীভাবে কিনব?</button>
+      <button class="ai-faq-btn" onclick="sendFaqMsg('৩য়-পক্ষ ড্রাইভ লিংক কীভাবে পাব?')">৩য়-পক্ষ ড্রাইভ লিংক?</button>
+    </div>
+
+    <!-- Input Bar -->
+    <form id="ai_chat_form" onsubmit="handleAIChatSubmit(event)" style="padding:10px 12px;background:#ffffff;border-top:1px solid #e2e8f0;display:flex;gap:8px;align-items:center;">
+      <input id="ai_user_input" type="text" placeholder="একটি প্রশ্ন লিখুন..." autocomplete="off" style="flex:1;padding:10px 14px;font-size:13px;border-radius:12px;border:1px solid #cbd5e1;background:#f8fafc;color:#1e293b;outline:none;" />
+      <button id="ai_submit_btn" type="submit" style="padding:10px 14px;background:#4f46e5;color:#ffffff;border:none;border-radius:12px;cursor:pointer;font-weight:bold;display:flex;align-items:center;justify-content:center;">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>
+      </button>
+    </form>
+  </div>
+</div>
+
+<style>
+  @keyframes aiPing { 75%, 100% { transform: scale(2); opacity: 0; } }
+  @keyframes aiBounce { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
+  .ai-faq-btn { padding: 4px 10px; font-size: 11px; font-weight: 600; border-radius: 999px; background: #f1f5f9; border: 1px solid #e2e8f0; color: #475569; cursor: pointer; transition: all 0.2s; white-space: nowrap; }
+  .ai-faq-btn:hover { background: #e2e8f0; color: #1e293b; }
+  .dark #ai_chat_modal { background: #0f172a !important; border-color: #1e293b !important; color: #f8fafc !important; }
+  .dark #ai_messages_container { background: #020617 !important; }
+  .dark #ai_quick_bar { background: #0f172a !important; border-color: #1e293b !important; }
+  .dark .ai-faq-btn { background: #1e293b !important; border-color: #334155 !important; color: #cbd5e1 !important; }
+  .dark #ai_chat_form { background: #0f172a !important; border-color: #1e293b !important; }
+  .dark #ai_user_input { background: #1e293b !important; border-color: #334155 !important; color: #f8fafc !important; }
+  .ai-chat-link { display: inline-flex; align-items: center; gap: 2px; padding: 2px 6px; border-radius: 6px; background: #e0e7ff; color: #4338ca !important; font-weight: 700; text-decoration: underline; margin: 0 2px; }
+  .dark .ai-chat-link { background: #312e81 !important; color: #a5b4fc !important; }
+</style>
+
+<script>
+(function(){
+  var isChatOpen = false;
+  var chatUserEmail = null;
+  var chatSessionId = "";
+  var chatHistory = [];
+  var isSending = false;
+
+  try {
+    chatSessionId = localStorage.getItem("toolshub_chat_session_id") || "";
+    if (!chatSessionId) {
+      chatSessionId = "sess_" + Math.random().toString(36).substring(2, 9) + "_" + Date.now();
+      localStorage.setItem("toolshub_chat_session_id", chatSessionId);
+    }
+  } catch(e) { chatSessionId = "sess_fallback"; }
+
+  var defaultGreeting = {
+    role: "assistant",
+    content: "আসসালামু আলাইকুম! ToolsHub BD এর এআই অ্যাসিস্ট্যান্টে স্বাগতম। আপনি কোন ডিজিটাল টুলস সম্পর্কে জানতে চান বা কীভাবে বিকাশ/নগদে অর্ডার করবেন তা জিজ্ঞেস করতে পারেন।"
+  };
+
+  try {
+    var cached = localStorage.getItem("toolshub_chat_messages");
+    if (cached) {
+      var parsed = JSON.parse(cached);
+      if (Array.isArray(parsed) && parsed.length > 0) chatHistory = parsed.slice(-10);
+    }
+  } catch(e) {}
+  if (chatHistory.length === 0) chatHistory = [defaultGreeting];
+
+  window.toggleAIChat = function() {
+    isChatOpen = !isChatOpen;
+    var btn = document.getElementById("ai_toggle_btn");
+    var modal = document.getElementById("ai_chat_modal");
+    if (isChatOpen) {
+      btn.style.display = "none";
+      modal.style.display = "flex";
+      renderMessages();
+      scrollBottom();
+      var inp = document.getElementById("ai_user_input");
+      if (inp) setTimeout(function(){ inp.focus(); }, 100);
+    } else {
+      btn.style.display = "flex";
+      modal.style.display = "none";
+    }
+  };
+
+  function formatContent(text) {
+    if (!text) return "";
+    var lines = text.split("\\n");
+    return lines.map(function(line){
+      var t = line.trim();
+      if (!t) return "<div style='height:4px;'></div>";
+      // Links [text](url)
+      t = t.replace(/\\[([^\\]]+)\\]\\(([^\\)]+)\\)/g, function(match, label, href){
+        return '<a href="' + href + '" class="ai-chat-link">' + label + ' ↗</a>';
+      });
+      // Bold **text**
+      t = t.replace(/\\*\\*(.*?)\\*\\*/g, '<strong>$1</strong>');
+      if (t.startsWith("•") || t.startsWith("-")) {
+        return '<div style="display:flex;gap:6px;padding-left:4px;"><span style="color:#4f46e5;font-weight:bold;">•</span><div>' + t.substring(1).trim() + '</div></div>';
+      }
+      return '<p style="margin:2px 0;">' + t + '</p>';
+    }).join("");
+  }
+
+  function renderMessages() {
+    var c = document.getElementById("ai_messages_container");
+    if (!c) return;
+    var isDark = document.documentElement.classList.contains("dark") || localStorage.getItem("theme") === "dark";
+    var html = "";
+    chatHistory.forEach(function(m){
+      var isUser = m.role === "user";
+      html += '<div style="display:flex;gap:8px;justify-content:' + (isUser ? 'flex-end' : 'flex-start') + ';">';
+      if (!isUser) {
+        html += '<div style="width:26px;height:26px;border-radius:50%;background:#e0e7ff;color:#4f46e5;display:flex;align-items:center;justify-content:center;font-size:12px;shrink:0;margin-top:2px;">🤖</div>';
+      }
+      html += '<div style="max-width:82%;padding:8px 12px;border-radius:16px;font-size:13px;line-height:1.5;' +
+        (isUser
+          ? 'background:#4f46e5;color:#ffffff;border-bottom-right-radius:4px;'
+          : (isDark ? 'background:#1e293b;color:#f1f5f9;border:1px solid #334155;' : 'background:#ffffff;color:#1e293b;border:1px solid #e2e8f0;') + 'border-bottom-left-radius:4px;') +
+        '">' + formatContent(m.content) + '</div>';
+      if (isUser) {
+        html += '<div style="width:26px;height:26px;border-radius:50%;background:#e2e8f0;color:#475569;display:flex;align-items:center;justify-content:center;font-size:12px;shrink:0;margin-top:2px;">👤</div>';
+      }
+      html += '</div>';
+    });
+
+    if (isSending) {
+      html += '<div style="display:flex;gap:8px;align-items:center;">' +
+        '<div style="width:26px;height:26px;border-radius:50%;background:#e0e7ff;color:#4f46e5;display:flex;align-items:center;justify-content:center;font-size:12px;">🤖</div>' +
+        '<div style="padding:6px 12px;border-radius:14px;' + (isDark ? 'background:#1e293b;border:1px solid #334155;' : 'background:#ffffff;border:1px solid #e2e8f0;') + 'display:flex;align-items:center;gap:6px;font-size:11px;font-weight:600;color:#6366f1;">' +
+          '<span>টাইপিং</span>' +
+          '<span style="display:inline-flex;gap:3px;">' +
+            '<span style="width:5px;height:5px;border-radius:50%;background:#6366f1;animation:aiBounce 1s infinite;"></span>' +
+            '<span style="width:5px;height:5px;border-radius:50%;background:#6366f1;animation:aiBounce 1s infinite 0.2s;"></span>' +
+            '<span style="width:5px;height:5px;border-radius:50%;background:#6366f1;animation:aiBounce 1s infinite 0.4s;"></span>' +
+          '</span>' +
+        '</div>' +
+      '</div>';
+    }
+
+    c.innerHTML = html;
+  }
+
+  function scrollBottom() {
+    var c = document.getElementById("ai_messages_container");
+    if (c) c.scrollTop = c.scrollHeight;
+  }
+
+  function saveHistory() {
+    try {
+      localStorage.setItem("toolshub_chat_messages", JSON.stringify(chatHistory.slice(-10)));
+    } catch(e) {}
+  }
+
+  window.sendFaqMsg = function(q) {
+    if (isSending) return;
+    var inp = document.getElementById("ai_user_input");
+    if (inp) inp.value = q;
+    handleAIChatSubmit();
+  };
+
+  window.handleAIChatSubmit = function(e) {
+    if (e && e.preventDefault) e.preventDefault();
+    if (isSending) return;
+    var inp = document.getElementById("ai_user_input");
+    if (!inp) return;
+    var text = inp.value.trim();
+    if (!text) return;
+    inp.value = "";
+
+    chatHistory.push({ role: "user", content: text });
+    renderMessages();
+    scrollBottom();
+    saveHistory();
+
+    isSending = true;
+    renderMessages();
+    scrollBottom();
+
+    var historyPayload = chatHistory.slice(-6);
+    fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: text,
+        session_id: chatSessionId,
+        user_email: chatUserEmail,
+        history: historyPayload
+      })
+    }).then(function(r){ return r.json(); })
+      .then(function(data){
+        isSending = false;
+        var reply = (data && data.reply) ? data.reply : (data && data.error ? data.error : "দুঃখিত, সংযোগে ত্রুটি হয়েছে।");
+        chatHistory.push({ role: "assistant", content: reply });
+        renderMessages();
+        scrollBottom();
+        saveHistory();
+      }).catch(function(){
+        isSending = false;
+        chatHistory.push({ role: "assistant", content: "নেটওয়ার্ক সংক্রান্ত সমস্যা দেখা দিয়েছে। আবার চেষ্টা করুন।" });
+        renderMessages();
+        scrollBottom();
+        saveHistory();
+      });
+  };
+
+  // Sync auth and server history
+  fetch("/api/auth/me").then(function(r){ return r.json(); }).then(function(auth){
+    if (auth && auth.authenticated && auth.user && auth.user.email) {
+      chatUserEmail = auth.user.email;
+    }
+    var q = chatUserEmail ? "user_email=" + encodeURIComponent(chatUserEmail) : "session_id=" + encodeURIComponent(chatSessionId);
+    return fetch("/api/chat?" + q);
+  }).then(function(r){ return r.json(); }).then(function(d){
+    if (d && Array.isArray(d.history) && d.history.length > 0) {
+      chatHistory = d.history.map(function(h){ return { role: h.role, content: h.content }; }).slice(-10);
+      saveHistory();
+      if (isChatOpen) { renderMessages(); scrollBottom(); }
+    }
+  }).catch(function(){});
+})();
+</script>
+`;
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -241,6 +747,39 @@ export default {
         };
         const token = await makeCustomerToken(newUser);
 
+        // Trigger Welcome Email asynchronously
+        if (ctx && ctx.waitUntil) {
+          ctx.waitUntil((async () => {
+            try {
+              const welcomeHtml = `
+                <div style="font-family:'Hind Siliguri',-apple-system,sans-serif;max-width:600px;margin:0 auto;padding:24px;border:1px solid #e2e8f0;border-radius:16px;background:#ffffff;color:#1e293b;">
+                  <div style="background:linear-gradient(135deg,#4f46e5,#7c3aed);padding:32px 24px;border-radius:12px;text-align:center;color:#ffffff;">
+                    <h1 style="margin:0;font-size:24px;">ToolsHub BD</h1>
+                    <p style="margin:8px 0 0 0;font-size:14px;opacity:0.9;">স্বাগতম আমাদের ডিজিটাল প্ল্যাটফর্মে!</p>
+                  </div>
+                  <div style="padding:24px 0;line-height:1.6;font-size:14px;">
+                    <h2 style="margin-top:0;font-size:18px;color:#0f172a;">আসসালামু আলাইকুম, ${cleanName}!</h2>
+                    <p>ToolsHub BD-তে আপনার অ্যাকাউন্ট সফলভাবে তৈরি হয়েছে। এখন আপনি খুব সহজেই যেকোনো প্রিমিয়াম ডিজিটাল টুলস, স্ক্রিপ্ট এবং সফটওয়্যার ক্রয় ও ইনস্ট্যান্ট অ্যাক্সেস করতে পারবেন।</p>
+                    <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:16px;margin:16px 0;">
+                      <p style="margin:4px 0;"><strong>আপনার ইউজার নাম:</strong> ${cleanName}</p>
+                      <p style="margin:4px 0;"><strong>লগইন ইমেইল:</strong> ${cleanEmail}</p>
+                    </div>
+                    <div style="text-align:center;margin:24px 0;">
+                      <a href="https://tootls.pages.dev/dashboard" style="display:inline-block;padding:14px 28px;background:#4f46e5;color:#ffffff;text-decoration:none;border-radius:10px;font-weight:bold;font-size:14px;">ড্যাশবোর্ডে প্রবেশ করুন →</a>
+                    </div>
+                  </div>
+                  <div style="text-align:center;border-top:1px solid #f1f5f9;padding-top:14px;font-size:11px;color:#94a3b8;">
+                    © 2026 ToolsHub BD. সর্বস্বত্ব সংরক্ষিত।
+                  </div>
+                </div>
+              `;
+              await triggerSmtpNotification(env, cleanEmail, `ToolsHub BD-তে স্বাগতম, ${cleanName}!`, welcomeHtml, "user_signup");
+            } catch (mailErr) {
+              console.error("Welcome email error:", mailErr);
+            }
+          })());
+        }
+
         return new Response(JSON.stringify({
           success: true,
           message: "অ্যাকাউন্ট সফলভাবে তৈরি করা হয়েছে!",
@@ -258,6 +797,138 @@ export default {
         });
       } catch (e) {
         return json({ error: "সাইনআপ প্রক্রিয়ায় ত্রুটি হয়েছে। অনুগ্রহ করে আবার চেষ্টা করুন।" }, 500);
+      }
+    }
+
+    // -------------------------------------------------------------
+    // Customer Auth: /api/auth/forgot-password
+    // -------------------------------------------------------------
+    if (pathname === "/api/auth/forgot-password" && request.method === "POST") {
+      try {
+        const body = await request.json();
+        const { email } = body;
+        if (!email || typeof email !== "string" || !email.includes("@")) {
+          return json({ error: "অনুগ্রহ করে একটি সঠিক ইমেইল প্রদান করুন।" }, 400);
+        }
+        const cleanEmail = email.toLowerCase().trim();
+        const user = await env.DB.prepare("SELECT id, name, email FROM users WHERE LOWER(TRIM(email)) = ? LIMIT 1")
+          .bind(cleanEmail).first();
+        if (!user) {
+          return json({ error: "এই ইমেইল দিয়ে কোনো অ্যাকাউন্ট পাওয়া যায়নি।" }, 404);
+        }
+
+        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+
+        await env.DB.prepare("UPDATE users SET reset_otp_code = ?, reset_otp_expires_at = ? WHERE id = ?")
+          .bind(otp, expiresAt, user.id).run();
+
+        if (ctx && ctx.waitUntil) {
+          ctx.waitUntil((async () => {
+            try {
+              const otpHtml = `
+                <div style="font-family:'Hind Siliguri',-apple-system,sans-serif;max-width:540px;margin:0 auto;padding:24px;border:1px solid #e2e8f0;border-radius:16px;background:#ffffff;color:#1e293b;">
+                  <div style="background:linear-gradient(135deg,#4f46e5,#6366f1);padding:28px 24px;border-radius:12px;text-align:center;color:#ffffff;">
+                    <h2 style="margin:0;font-size:22px;">পাসওয়ার্ড রিসেট ওটিপি কোড</h2>
+                    <p style="margin:6px 0 0 0;font-size:13px;opacity:0.9;">ToolsHub BD অ্যাকাউন্ট নিরাপত্তা</p>
+                  </div>
+                  <div style="padding:24px 0;line-height:1.6;font-size:14px;">
+                    <p>প্রিয় <strong>${user.name || 'গ্রাহক'}</strong>,</p>
+                    <p>আপনার ToolsHub BD অ্যাকাউন্টের পাসওয়ার্ড রিসেট করার অনুরোধের প্রেক্ষিতে নিচের ৬-সংখ্যার ওটিপি কোডটি প্রদান করা হলো:</p>
+                    <div style="background:#f0fdf4;border:2px dashed #16a34a;border-radius:12px;padding:18px;text-align:center;margin:20px 0;">
+                      <div style="font-size:11px;color:#15803d;font-weight:bold;margin-bottom:4px;text-transform:uppercase;">আপনার ওটিপি কোড</div>
+                      <div style="font-family:monospace;font-size:32px;font-weight:800;letter-spacing:6px;color:#15803d;">${otp}</div>
+                      <div style="font-size:11px;color:#64748b;margin-top:6px;">(এই কোডটি আগামী ১৫ মিনিট কার্যকর থাকবে)</div>
+                    </div>
+                    <div style="font-size:12px;color:#b45309;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:12px;">
+                      ⚠️ আপনি যদি এই পাসওয়ার্ড পরিবর্তনের অনুরোধ না করে থাকেন, তবে অবিলম্বে এই ইমেইলটি এড়িয়ে চলুন। আপনার পাসওয়ার্ড অপরিবর্তিত থাকবে।
+                    </div>
+                  </div>
+                  <div style="text-align:center;border-top:1px solid #f1f5f9;padding-top:14px;font-size:11px;color:#94a3b8;">
+                    © 2026 ToolsHub BD. সর্বস্বত্ব সংরক্ষিত।
+                  </div>
+                </div>
+              `;
+              await triggerSmtpNotification(env, cleanEmail, `পাসওয়ার্ড রিসেট ভেরিফিকেশন কোড — ${otp} | ToolsHub BD`, otpHtml, "forgot_password_otp");
+            } catch(e) {
+              console.error("Forgot password email error:", e);
+            }
+          })());
+        }
+
+        return json({
+          success: true,
+          message: "আপনার ইমেইলে একটি ৬-সংখ্যার ভেরিফিকেশন ওটিপি কোড পাঠানো হয়েছে।"
+        });
+      } catch (err) {
+        return json({ error: String(err) }, 500);
+      }
+    }
+
+    // -------------------------------------------------------------
+    // Customer Auth: /api/auth/reset-password
+    // -------------------------------------------------------------
+    if (pathname === "/api/auth/reset-password" && request.method === "POST") {
+      try {
+        const body = await request.json();
+        const { email, otp_code, new_password } = body;
+        if (!email || !otp_code || !new_password) {
+          return json({ error: "ইমেইল, ওটিপি এবং নতুন পাসওয়ার্ড সবকটি আবশ্যক।" }, 400);
+        }
+        if (typeof new_password !== "string" || new_password.length < 6) {
+          return json({ error: "নতুন পাসওয়ার্ড কমপক্ষে ৬ অক্ষরের হতে হবে।" }, 400);
+        }
+
+        const cleanEmail = email.toLowerCase().trim();
+        const cleanOtp = String(otp_code).trim();
+        const user = await env.DB.prepare("SELECT * FROM users WHERE LOWER(TRIM(email)) = ? LIMIT 1").bind(cleanEmail).first();
+        if (!user) {
+          return json({ error: "ইউজার পাওয়া যায়নি।" }, 404);
+        }
+
+        if (!user.reset_otp_code || user.reset_otp_code.trim() !== cleanOtp) {
+          return json({ error: "ভেরিফিকেশন ওটিপি কোডটি সঠিক নয়।" }, 400);
+        }
+
+        if (user.reset_otp_expires_at) {
+          if (Date.now() > new Date(user.reset_otp_expires_at).getTime()) {
+            return json({ error: "ওটিপি কোডটির মেয়াদ শেষ হয়ে গেছে। নতুন কোড রিকোয়েস্ট করুন।" }, 400);
+          }
+        }
+
+        const newHash = await hashCustomerPassword(new_password);
+        await env.DB.prepare("UPDATE users SET password_hash = ?, reset_otp_code = NULL, reset_otp_expires_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+          .bind(newHash, user.id).run();
+
+        if (ctx && ctx.waitUntil) {
+          ctx.waitUntil((async () => {
+            try {
+              const successHtml = `
+                <div style="font-family:'Hind Siliguri',-apple-system,sans-serif;max-width:540px;margin:0 auto;padding:24px;border:1px solid #e2e8f0;border-radius:16px;background:#ffffff;color:#1e293b;">
+                  <div style="background:#10b981;padding:24px;border-radius:12px;text-align:center;color:#ffffff;">
+                    <h2 style="margin:0;font-size:20px;">✓ পাসওয়ার্ড সফলভাবে পরিবর্তিত হয়েছে</h2>
+                  </div>
+                  <div style="padding:20px 0;line-height:1.6;font-size:14px;">
+                    <p>প্রিয় <strong>${user.name || 'গ্রাহক'}</strong>,</p>
+                    <p>আপনার ToolsHub BD অ্যাকাউন্টের পাসওয়ার্ড সফলভাবে আপডেট করা হয়েছে। এখন আপনি নতুন পাসওয়ার্ড দিয়ে লগইন করতে পারেন।</p>
+                    <div style="text-align:center;margin:24px 0;">
+                      <a href="https://tootls.pages.dev/login" style="display:inline-block;padding:12px 28px;background:#4f46e5;color:#ffffff;text-decoration:none;border-radius:10px;font-weight:bold;font-size:14px;">লগইন পেজে যান →</a>
+                    </div>
+                  </div>
+                  <div style="text-align:center;border-top:1px solid #f1f5f9;padding-top:14px;font-size:11px;color:#94a3b8;">ToolsHub BD</div>
+                </div>
+              `;
+              await triggerSmtpNotification(env, cleanEmail, "আপনার পাসওয়ার্ড সফলভাবে পরিবর্তিত হয়েছে | ToolsHub BD", successHtml, "password_reset_success");
+            } catch(e) {}
+          })());
+        }
+
+        return json({
+          success: true,
+          message: "পাসওয়ার্ড সফলভাবে পরিবর্তিত হয়েছে! এখন লগইন করুন।"
+        });
+      } catch (err) {
+        return json({ error: String(err) }, 500);
       }
     }
 
@@ -362,10 +1033,35 @@ export default {
     }
 
     // -------------------------------------------------------------
+    // Automated Cron Endpoint: /api/cron/subscriptions
+    // -------------------------------------------------------------
+    if (pathname === "/api/cron/subscriptions") {
+      const isCronKeyMatch = url.searchParams.get("key") === "toolshub_cron_secret_2026" ||
+                             request.headers.get("X-Cron-Key") === "toolshub_cron_secret_2026" ||
+                             hasAdminSession;
+      if (!isCronKeyMatch) {
+        return json({ error: "Unauthorized cron access. Provide valid key." }, 401);
+      }
+      try {
+        const stats = await runSubscriptionReminderCron(env);
+        return json({
+          success: true,
+          message: `Subscription cron executed. ${stats.notifications_sent || 0} reminders sent.`,
+          ...stats
+        });
+      } catch (err) {
+        return json({ error: String(err) }, 500);
+      }
+    }
+
+    // -------------------------------------------------------------
     // PROTECT ALL ADMIN ENDPOINTS
     // -------------------------------------------------------------
     if (pathname.startsWith("/api/admin/") && pathname !== "/api/admin/auth") {
-      if (!hasAdminSession) {
+      const isCronKeyMatch = url.searchParams.get("key") === "toolshub_cron_secret_2026" ||
+                             request.headers.get("X-Cron-Key") === "toolshub_cron_secret_2026";
+      const isCronEndpoint = pathname === "/api/admin/subscriptions/trigger-cron" && isCronKeyMatch;
+      if (!hasAdminSession && !isCronEndpoint) {
         return json({ error: "অননুমোদিত অ্যাক্সেস। অনুগ্রহ করে লগইন করুন।" }, 401);
       }
     }
@@ -464,6 +1160,43 @@ export default {
     }
 
     // -------------------------------------------------------------
+    // Cloudflare Edge Cache Purge Helper
+    // -------------------------------------------------------------
+    const purgeProductCache = async (slugToPurge) => {
+      try {
+        const cache = caches.default;
+        const origin = url.origin;
+        const urlsToPurge = [
+          origin + "/",
+          origin + "/api/products",
+          origin + "/api/products?category=all",
+          origin + "/sitemap.xml"
+        ];
+        if (slugToPurge) {
+          urlsToPurge.push(origin + "/tools/" + slugToPurge);
+          urlsToPurge.push(origin + "/checkout/" + slugToPurge);
+          urlsToPurge.push(origin + "/api/products/" + slugToPurge);
+        }
+        await Promise.allSettled(urlsToPurge.map(u => cache.delete(new Request(u))));
+      } catch (e) {
+        console.error("Cache purge failed:", e);
+      }
+    };
+
+    // -------------------------------------------------------------
+    // API: Purge Edge Cache (/api/admin/purge-cache)
+    // -------------------------------------------------------------
+    if (pathname === "/api/admin/purge-cache" && request.method === "POST") {
+      try {
+        const body = await request.json().catch(() => ({}));
+        await purgeProductCache(body.slug);
+        return json({ success: true, message: "ক্লাউডফ্লেয়ার এজ ক্যাশ সফলভাবে ক্লিয়ার (Purge) হয়েছে!" });
+      } catch (err) {
+        return json({ error: String(err) }, 500);
+      }
+    }
+
+    // -------------------------------------------------------------
     // API: /api/admin/products
     // -------------------------------------------------------------
     if (pathname === "/api/admin/products") {
@@ -496,7 +1229,11 @@ export default {
             body.version || "", body.preview_url || "", body.thumbnail_url || "",
             "[]", JSON.stringify(body.features || []), "", body.is_featured ? 1 : 0, body.status || "published"
           ).run();
-          return json({ success: true, id });
+
+          // Auto purge Cloudflare edge cache immediately
+          await purgeProductCache(safeSlug);
+
+          return json({ success: true, id, message: "প্রোডাক্ট সফলভাবে যুক্ত হয়েছে ও ক্যাশ ক্লিয়ার করা হয়েছে!" });
         } catch (err) {
           return json({ error: String(err) }, 500);
         }
@@ -524,7 +1261,11 @@ export default {
             body.thumbnail_url || "", JSON.stringify(body.features || []),
             body.is_featured ? 1 : 0, body.status || "published", body.id
           ).run();
-          return json({ success: true, message: "প্রোডাক্ট সফলভাবে আপডেট হয়েছে!" });
+
+          // Auto purge Cloudflare edge cache immediately
+          await purgeProductCache(safeSlug);
+
+          return json({ success: true, message: "প্রোডাক্ট সফলভাবে আপডেট হয়েছে ও ক্যাশ ক্লিয়ার করা হয়েছে!" });
         } catch (err) {
           return json({ error: String(err) }, 500);
         }
@@ -532,6 +1273,7 @@ export default {
       if (request.method === "DELETE") {
         const id = url.searchParams.get("id");
         if (id) {
+          const prodToDelete = await env.DB.prepare("SELECT slug FROM products WHERE id = ?").bind(id).first();
           try {
             await env.DB.prepare("DELETE FROM order_messages WHERE order_id IN (SELECT id FROM orders WHERE product_id = ?) OR order_number IN (SELECT order_number FROM orders WHERE product_id = ?)").bind(id, id).run();
           } catch(e) {}
@@ -545,8 +1287,13 @@ export default {
             await env.DB.prepare("DELETE FROM subscriptions WHERE product_id = ?").bind(id).run();
           } catch(e) {}
           await env.DB.prepare("DELETE FROM products WHERE id = ?").bind(id).run();
+
+          // Auto purge Cloudflare edge cache immediately
+          if (prodToDelete?.slug) {
+            await purgeProductCache(prodToDelete.slug);
+          }
         }
-        return json({ success: true, message: "প্রোডাক্ট সফলভাবে মুছে ফেলা হয়েছে" });
+        return json({ success: true, message: "প্রোডাক্ট সফলভাবে মুছে ফেলা হয়েছে ও ক্যাশ ক্লিয়ার করা হয়েছে" });
       }
     }
 
@@ -800,7 +1547,7 @@ JSON structure:
           body.order_id
         ).run();
 
-        // If newly approved, check if product is a subscription
+        // If newly approved, check if product is a subscription & send delivery email
         if (body.payment_status === "approved" && prevStatus !== "approved") {
           try {
             const prod = await env.DB.prepare("SELECT * FROM products WHERE id = ? LIMIT 1").bind(ord.product_id).first();
@@ -820,8 +1567,48 @@ JSON structure:
                 VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, 'active', ?, CURRENT_TIMESTAMP)
               `).bind(subId, ord.customer_name, ord.customer_email, prod.id, prod.title, period, expDate.toISOString(), ord.id).run();
             }
+
+            // Asynchronous SMTP Notification for customer
+            if (ctx && ctx.waitUntil) {
+              ctx.waitUntil((async () => {
+                try {
+                  const downloadUrl = `https://tootls.pages.dev/download/${ord.download_token}`;
+                  const trackingUrl = `https://tootls.pages.dev/track-order`;
+                  const keyText = body.delivered_license_key || ord.delivered_license_key || "";
+                  const emailHtml = `
+                    <div style="font-family:'Hind Siliguri',sans-serif;max-width:600px;margin:0 auto;padding:24px;border:1px solid #e2e8f0;border-radius:16px;background:#ffffff;color:#1e293b;">
+                      <div style="text-align:center;padding-bottom:16px;border-bottom:1px solid #f1f5f9;">
+                        <h1 style="color:#10b981;margin:0;font-size:22px;">🎉 ToolsHub BD — পেমেন্ট অনুমোদিত!</h1>
+                      </div>
+                      <div style="padding:20px 0;">
+                        <h2 style="color:#0f172a;font-size:18px;margin-top:0;">অভিনন্দন! আপনার অর্ডারটি অ্যাক্টিভেট হয়েছে</h2>
+                        <p style="font-size:14px;color:#475569;line-height:1.6;">অর্ডার নম্বর: <strong style="color:#4f46e5;">#${ord.order_number}</strong> (${ord.product_title}) এর পেমেন্ট ভেরিফিকেশন সফল হয়েছে। আপনার ডাউনলোড ও এক্সেস এখন সম্পূর্ণ প্রস্তুত!</p>
+                        
+                        ${keyText ? `
+                        <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:12px;padding:16px;margin:16px 0;font-size:13px;">
+                          <p style="margin:0 0 4px 0;color:#166534;font-weight:bold;">আপনার লাইসেন্স কী / এক্সেস কোড:</p>
+                          <code style="font-size:15px;font-weight:bold;color:#15803d;background:#ffffff;padding:4px 8px;border-radius:6px;display:inline-block;">${keyText}</code>
+                        </div>
+                        ` : ''}
+
+                        <div style="text-align:center;margin:24px 0;">
+                          <a href="${downloadUrl}" style="display:inline-block;padding:12px 24px;background:#10b981;color:#ffffff;text-decoration:none;border-radius:10px;font-weight:bold;font-size:14px;margin-right:8px;">সরাসরি ডাউনলোড করুন</a>
+                          <a href="${trackingUrl}" style="display:inline-block;padding:12px 24px;background:#4f46e5;color:#ffffff;text-decoration:none;border-radius:10px;font-weight:bold;font-size:14px;">অর্ডার ভিউ করুন</a>
+                        </div>
+                      </div>
+                      <div style="text-align:center;padding-top:16px;border-top:1px solid #f1f5f9;font-size:11px;color:#94a3b8;">
+                        © 2026 ToolsHub BD. All rights reserved.
+                      </div>
+                    </div>
+                  `;
+                  await triggerSmtpNotification(env, ord.customer_email, `আপনার অর্ডার অনুমোদিত হয়েছে — #${ord.order_number}`, emailHtml, "order_approved");
+                } catch (e) {
+                  console.error("Order approval email error:", e);
+                }
+              })());
+            }
           } catch(e) {
-            console.error("Subscription create error in worker:", e);
+            console.error("Subscription or approval notification error:", e);
           }
         }
         return json({ success: true });
@@ -920,6 +1707,22 @@ JSON structure:
     }
 
     // -------------------------------------------------------------
+    // API: /api/admin/subscriptions/trigger-cron
+    // -------------------------------------------------------------
+    if (pathname === "/api/admin/subscriptions/trigger-cron" && request.method === "POST") {
+      try {
+        const stats = await runSubscriptionReminderCron(env);
+        return json({
+          success: true,
+          message: `সাবস্ক্রিপশন ক্রন সফলভাবে সম্পন্ন হয়েছে! ${stats.notifications_sent || 0} টি রিমাইন্ডার ইমেইল পাঠানো হয়েছে।`,
+          ...stats
+        });
+      } catch (err) {
+        return json({ error: String(err) }, 500);
+      }
+    }
+
+    // -------------------------------------------------------------
     // API: /api/admin/settings/email
     // -------------------------------------------------------------
     if (pathname === "/api/admin/settings/email") {
@@ -938,10 +1741,62 @@ JSON structure:
         try {
           const b = await request.json();
           if (b.is_test) {
-            const logId = "eml_" + Math.random().toString(36).substring(2, 9);
-            await env.DB.prepare("INSERT INTO email_logs (id, recipient, subject, event_type, status, created_at) VALUES (?, ?, ?, 'smtp_test', 'sent', CURRENT_TIMESTAMP)")
-              .bind(logId, b.test_recipient, "ToolsHub BD — SMTP টেস্ট সফল!").run();
-            return json({ success: true, message: `টেস্ট ইমেইল ${b.test_recipient} এ সফলভাবে প্রেরণ করা হয়েছে!` });
+            const s = await env.DB.prepare("SELECT * FROM settings WHERE id = 'general'").first();
+            const host = b.smtp_host || s?.smtp_host;
+            const port = Number(b.smtp_port || s?.smtp_port || 465);
+            const secure = b.smtp_secure !== undefined ? b.smtp_secure : s?.smtp_secure;
+            const user = b.smtp_user || s?.smtp_user;
+            const pass = b.smtp_pass || s?.smtp_pass;
+            const fromName = b.email_from_name || s?.email_from_name || "ToolsHub BD";
+            const fromEmail = b.email_from_address || s?.email_from_address || user;
+            const toEmail = b.test_recipient;
+
+            if (!host || !user || !pass || !toEmail) {
+              return json({ success: false, error: "SMTP হোস্ট, ইউজারনেম, পাসওয়ার্ড এবং প্রাপকের ইমেইল আবশ্যক।" }, 400);
+            }
+
+            try {
+              await sendSmtpWorker({
+                host,
+                port,
+                secure: Boolean(secure),
+                user,
+                pass,
+                fromName,
+                fromEmail,
+                toEmail,
+                subject: "ToolsHub BD — SMTP টেস্ট কনফিগারেশন সফল!",
+                htmlBody: `
+                  <div style="font-family:'Hind Siliguri',sans-serif;padding:24px;border:1px solid #e2e8f0;border-radius:12px;max-width:600px;margin:0 auto;color:#1e293b;background:#ffffff;">
+                    <div style="text-align:center;padding-bottom:16px;border-bottom:1px solid #f1f5f9;">
+                      <h2 style="color:#4f46e5;margin:0;">⚡ ToolsHub BD — SMTP টেস্ট সফল</h2>
+                      <p style="color:#64748b;font-size:12px;margin:4px 0 0 0;">ক্লাউডফ্লেয়ার এজ ওয়ার্কার ইমেইল সিস্টেম</p>
+                    </div>
+                    <div style="padding:20px 0;font-size:14px;line-height:1.6;color:#334155;">
+                      <p>অভিনন্দন! আপনার SMTP সার্ভার <strong>(${host}:${port})</strong> সফলভাবে ক্লাউডফ্লেয়ার এজ থেকে কানেক্ট হয়েছে এবং টেস্ট ইমেইল প্রেরণ করেছে।</p>
+                      <div style="background:#f8fafc;padding:12px 16px;border-radius:8px;font-size:13px;margin:16px 0;">
+                        <p style="margin:4px 0;"><strong>প্রেরক:</strong> "${fromName}" &lt;${fromEmail}&gt;</p>
+                        <p style="margin:4px 0;"><strong>প্রাপক:</strong> ${toEmail}</p>
+                        <p style="margin:4px 0;"><strong>টাইমস্ট্যাম্প:</strong> ${new Date().toLocaleString("bn-BD")}</p>
+                      </div>
+                      <p style="font-size:13px;color:#10b981;font-weight:bold;">✓ সকল সেটিংস এখন সক্রিয় ও প্রস্তুত।</p>
+                    </div>
+                  </div>
+                `
+              });
+
+              const logId = "eml_" + Math.random().toString(36).substring(2, 9);
+              await env.DB.prepare("INSERT INTO email_logs (id, recipient, subject, event_type, status, created_at) VALUES (?, ?, ?, 'smtp_test', 'sent', CURRENT_TIMESTAMP)")
+                .bind(logId, toEmail, "ToolsHub BD — SMTP টেস্ট সফল!").run();
+
+              return json({ success: true, message: `টেস্ট ইমেইল ${toEmail} এ সফলভাবে প্রেরণ করা হয়েছে!` });
+            } catch (err) {
+              const logId = "eml_" + Math.random().toString(36).substring(2, 9);
+              await env.DB.prepare("INSERT INTO email_logs (id, recipient, subject, event_type, status, error_message, created_at) VALUES (?, ?, ?, 'smtp_test', 'failed', ?, CURRENT_TIMESTAMP)")
+                .bind(logId, toEmail, "ToolsHub BD — SMTP টেস্ট", String(err?.message || err)).run();
+
+              return json({ success: false, error: "ইমেইল পাঠাতে ব্যর্থ: " + (err?.message || err) }, 500);
+            }
           }
           await env.DB.prepare(`
             UPDATE settings
@@ -949,7 +1804,7 @@ JSON structure:
                 email_from_name = ?, email_from_address = ?, email_notifications_enabled = ?, updated_at = CURRENT_TIMESTAMP
             WHERE id = 'general'
           `).bind(
-            b.smtp_host || "", Number(b.smtp_port || 587), b.smtp_secure ? 1 : 0,
+            b.smtp_host || "", Number(b.smtp_port || 465), b.smtp_secure ? 1 : 0,
             b.smtp_user || "", b.smtp_pass || "", b.email_from_name || "ToolsHub BD",
             b.email_from_address || "", b.email_notifications_enabled ? 1 : 0
           ).run();
@@ -975,6 +1830,21 @@ JSON structure:
         q += " ORDER BY created_at DESC";
         const prods = await env.DB.prepare(q).bind(...p).all();
         return json({ success: true, products: prods.results || [] });
+      } catch(e) {
+        return json({ error: String(e) }, 500);
+      }
+    }
+
+    // -------------------------------------------------------------
+    // Public API: /api/products/:slug (Returns single published product)
+    // -------------------------------------------------------------
+    if (pathname.startsWith("/api/products/")) {
+      try {
+        const prodSlug = decodeURIComponent(pathname.replace("/api/products/", "").replace(/\/$/, ""));
+        const prod = await env.DB.prepare("SELECT * FROM products WHERE (slug = ? OR id = ?) AND status = 'published' LIMIT 1")
+          .bind(prodSlug, prodSlug).first();
+        if (!prod) return json({ error: "Product not found" }, 404);
+        return json({ success: true, product: prod });
       } catch(e) {
         return json({ error: String(e) }, 500);
       }
@@ -1211,10 +2081,21 @@ JSON structure:
     if (pathname === "/api/admin/settings") {
       if (request.method === "GET") {
         const s = await env.DB.prepare("SELECT * FROM settings WHERE id = 'general' LIMIT 1").first();
+        if (s) {
+          delete s.admin_password_hash;
+          delete s.admin_otp_code;
+          delete s.admin_otp_expires_at;
+        }
         return json({ settings: s });
       }
       if (request.method === "PUT") {
         const b = await request.json();
+        try { await env.DB.prepare("ALTER TABLE settings ADD COLUMN contact_page_json TEXT").run(); } catch (_) {}
+        try { await env.DB.prepare("ALTER TABLE settings ADD COLUMN telegram_channel TEXT").run(); } catch (_) {}
+        try { await env.DB.prepare("ALTER TABLE settings ADD COLUMN whatsapp_number TEXT").run(); } catch (_) {}
+        try { await env.DB.prepare("ALTER TABLE settings ADD COLUMN homepage_json TEXT").run(); } catch (_) {}
+        try { await env.DB.prepare("ALTER TABLE settings ADD COLUMN chatbot_faqs_json TEXT").run(); } catch (_) {}
+
         const cur = await env.DB.prepare("SELECT * FROM settings WHERE id = 'general' LIMIT 1").first() || {};
         await env.DB.prepare(`
           UPDATE settings
@@ -1225,6 +2106,8 @@ JSON structure:
               homepage_json = COALESCE(?, homepage_json),
               chatbot_faqs_json = COALESCE(?, chatbot_faqs_json),
               whatsapp_number = COALESCE(?, whatsapp_number),
+              telegram_channel = COALESCE(?, telegram_channel),
+              contact_page_json = COALESCE(?, contact_page_json),
               updated_at = CURRENT_TIMESTAMP
           WHERE id = 'general'
         `).bind(
@@ -1240,7 +2123,9 @@ JSON structure:
           b.ai_system_prompt ?? cur.ai_system_prompt,
           b.homepage_json !== undefined ? (typeof b.homepage_json === "string" ? b.homepage_json : JSON.stringify(b.homepage_json)) : null,
           b.chatbot_faqs_json !== undefined ? (typeof b.chatbot_faqs_json === "string" ? b.chatbot_faqs_json : JSON.stringify(b.chatbot_faqs_json)) : null,
-          b.whatsapp_number !== undefined ? b.whatsapp_number : null
+          b.whatsapp_number !== undefined ? b.whatsapp_number : null,
+          b.telegram_channel !== undefined ? b.telegram_channel : null,
+          b.contact_page_json !== undefined ? (typeof b.contact_page_json === "string" ? b.contact_page_json : JSON.stringify(b.contact_page_json)) : null
         ).run();
         return json({ success: true });
       }
@@ -1473,6 +2358,104 @@ JSON structure:
           downloadToken, appliedCoupon, discountAmount
         ).run();
 
+        // Trigger automated email notifications asynchronously via SMTP
+        if (ctx && ctx.waitUntil) {
+          ctx.waitUntil((async () => {
+            try {
+              // 1. Customer Order Confirmation Email
+              const emailHtml = `
+                <div style="font-family:'Hind Siliguri',-apple-system,sans-serif;max-width:600px;margin:0 auto;padding:24px;border:1px solid #e2e8f0;border-radius:16px;background:#ffffff;color:#1e293b;">
+                  <div style="text-align:center;padding-bottom:16px;border-bottom:1px solid #f1f5f9;">
+                    <h1 style="color:#4f46e5;margin:0;font-size:22px;">⚡ ToolsHub BD</h1>
+                    <p style="color:#64748b;font-size:12px;margin:4px 0 0 0;">আপনার বিশ্বস্ত ডিজিটাল টুলস স্টোর</p>
+                  </div>
+                  <div style="padding:20px 0;">
+                    <h2 style="color:#0f172a;font-size:18px;margin-top:0;">আপনার অর্ডারটি সফলভাবে গ্রহণ করা হয়েছে!</h2>
+                    <p style="font-size:14px;color:#475569;line-height:1.6;">প্রিয় <strong>${cleanName}</strong>, আপনার অর্ডার নম্বর: <strong style="color:#4f46e5;">#${orderNumber}</strong>। আমাদের টিম দ্রুত আপনার পেমেন্ট ভেরিফাই করে ফাইল ডেলিভারি চালু করে দিবে।</p>
+                    
+                    <div style="background:#f8fafc;border-radius:12px;padding:16px;margin:16px 0;font-size:13px;">
+                      <p style="margin:4px 0;"><strong>প্রোডাক্ট:</strong> ${prodTitle}</p>
+                      <p style="margin:4px 0;"><strong>মোট পরিশোধিত:</strong> ৳${finalAmount}</p>
+                      <p style="margin:4px 0;"><strong>পেমেন্ট মেথড:</strong> ${body.payment_method}</p>
+                      <p style="margin:4px 0;"><strong>TrxID:</strong> ${body.transaction_id || 'N/A'}</p>
+                    </div>
+
+                    <div style="text-align:center;margin:20px 0;">
+                      <a href="https://tootls.pages.dev/track-order" style="display:inline-block;padding:12px 24px;background:#4f46e5;color:#ffffff;text-decoration:none;border-radius:10px;font-weight:bold;font-size:14px;">অর্ডার ট্র্যাক করুন</a>
+                    </div>
+                  </div>
+                  <div style="text-align:center;padding-top:16px;border-top:1px solid #f1f5f9;font-size:11px;color:#94a3b8;">
+                    © 2026 ToolsHub BD. All rights reserved.
+                  </div>
+                </div>
+              `;
+              await triggerSmtpNotification(env, cleanEmail, `আপনার অর্ডার গ্রহণ করা হয়েছে — #${orderNumber}`, emailHtml, "order_created");
+
+              // 2. Admin Order Notification Alert
+              const s = await env.DB.prepare("SELECT admin_email FROM settings WHERE id = 'general'").first();
+              const adminEmail = s?.admin_email || "sohagbdmt@gmail.com";
+              const adminAlertHtml = `
+                <div style="font-family:'Hind Siliguri',-apple-system,sans-serif;max-width:600px;margin:0 auto;padding:24px;border:1px solid #cbd5e1;border-radius:16px;background:#ffffff;color:#0f172a;">
+                  <div style="background:linear-gradient(135deg,#4f46e5,#4338ca);padding:24px;border-radius:12px;text-align:center;color:#ffffff;">
+                    <span style="background:#fbbf24;color:#78350f;font-weight:bold;font-size:12px;padding:3px 10px;border-radius:999px;text-transform:uppercase;">🔔 নতুন অর্ডার অ্যালার্ট</span>
+                    <h2 style="margin:8px 0 0 0;font-size:20px;">নতুন অর্ডার এসেছে! #${orderNumber}</h2>
+                  </div>
+                  <div style="padding:20px 0;line-height:1.6;font-size:14px;">
+                    <p>অ্যাডমিন মহোদয়, ওয়েবসাইটে একজন গ্রাহক নতুন একটি অর্ডার দিয়েছেন:</p>
+                    <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:16px;margin:16px 0;">
+                      <p style="margin:4px 0;"><strong>প্রোডাক্ট:</strong> ${prodTitle}</p>
+                      <p style="margin:4px 0;"><strong>মূল্য:</strong> <span style="color:#10b981;font-weight:bold;font-size:16px;">৳${finalAmount}</span></p>
+                      <p style="margin:4px 0;"><strong>গ্রাহকের নাম:</strong> ${cleanName}</p>
+                      <p style="margin:4px 0;"><strong>ইমেইল:</strong> ${cleanEmail}</p>
+                      <p style="margin:4px 0;"><strong>ফোন:</strong> ${body.customer_phone || 'N/A'}</p>
+                      <p style="margin:4px 0;"><strong>পেমেন্ট মেথড:</strong> ${body.payment_method}</p>
+                      <p style="margin:4px 0;"><strong>প্রেরক নম্বর:</strong> ${body.sender_number || 'N/A'}</p>
+                      <p style="margin:4px 0;"><strong>TrxID:</strong> <code style="background:#e0e7ff;padding:2px 6px;border-radius:4px;color:#3730a3;font-weight:bold;">${body.transaction_id || 'N/A'}</code></p>
+                      ${appliedCoupon ? `<p style="margin:4px 0;color:#059669;"><strong>কুপন কোড:</strong> ${appliedCoupon} (-৳${discountAmount})</p>` : ''}
+                    </div>
+                    <div style="text-align:center;margin:24px 0;">
+                      <a href="https://tootls.pages.dev/admin/orders" style="display:inline-block;padding:12px 24px;background:#4f46e5;color:#ffffff;text-decoration:none;border-radius:10px;font-weight:bold;font-size:14px;">অ্যাডমিন প্যানেলে ভিউ ও ভেরিফাই করুন →</a>
+                    </div>
+                  </div>
+                  <div style="text-align:center;border-top:1px solid #f1f5f9;padding-top:14px;font-size:11px;color:#94a3b8;">
+                    ToolsHub BD Automated Server Notification
+                  </div>
+                </div>
+              `;
+              await triggerSmtpNotification(env, adminEmail, `⚡ নতুন অর্ডার এসেছে — #${orderNumber} (৳${finalAmount})`, adminAlertHtml, "admin_order_alert");
+
+              // 3. Welcome Email if auto-account created
+              if (newAccountCreated) {
+                const welcomeHtml = `
+                  <div style="font-family:'Hind Siliguri',-apple-system,sans-serif;max-width:600px;margin:0 auto;padding:24px;border:1px solid #e2e8f0;border-radius:16px;background:#ffffff;color:#1e293b;">
+                    <div style="background:linear-gradient(135deg,#4f46e5,#7c3aed);padding:32px 24px;border-radius:12px;text-align:center;color:#ffffff;">
+                      <h1 style="margin:0;font-size:24px;">ToolsHub BD</h1>
+                      <p style="margin:8px 0 0 0;font-size:14px;opacity:0.9;">স্বাগতম আমাদের প্ল্যাটফর্মে!</p>
+                    </div>
+                    <div style="padding:24px 0;line-height:1.6;font-size:14px;">
+                      <h2 style="margin-top:0;font-size:18px;color:#0f172a;">আসসালামু আলাইকুম, ${cleanName}!</h2>
+                      <p>চেকআউট করার সময় আপনার অ্যাকাউন্টটি স্বয়ংক্রিয়ভাবে তৈরি হয়েছে। আপনার লগইন তথ্য নিচে দেওয়া হলো:</p>
+                      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:16px;margin:16px 0;">
+                        <p style="margin:4px 0;"><strong>লগইন ইমেইল:</strong> ${cleanEmail}</p>
+                        <p style="margin:4px 0;"><strong>অ্যাকাউন্ট স্ট্যাটাস:</strong> সক্রিয়</p>
+                      </div>
+                      <div style="text-align:center;margin:24px 0;">
+                        <a href="https://tootls.pages.dev/dashboard" style="display:inline-block;padding:14px 28px;background:#4f46e5;color:#ffffff;text-decoration:none;border-radius:10px;font-weight:bold;font-size:14px;">ড্যাশবোর্ডে প্রবেশ করুন →</a>
+                      </div>
+                    </div>
+                    <div style="text-align:center;border-top:1px solid #f1f5f9;padding-top:14px;font-size:11px;color:#94a3b8;">
+                      © 2026 ToolsHub BD. সর্বস্বত্ব সংরক্ষিত।
+                    </div>
+                  </div>
+                `;
+                await triggerSmtpNotification(env, cleanEmail, `ToolsHub BD-তে স্বাগতম, ${cleanName}!`, welcomeHtml, "user_signup");
+              }
+            } catch (e) {
+              console.error("Order creation email error:", e);
+            }
+          })());
+        }
+
         const headers = { "Content-Type": "application/json" };
         if (sessionToken) {
           headers["Set-Cookie"] = "toolshub_user_session=" + sessionToken + "; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000";
@@ -1542,21 +2525,19 @@ JSON structure:
           }
 
           const sid = url.searchParams.get("session_id");
-          const uemail = url.searchParams.get("user_email");
+          let uemail = url.searchParams.get("user_email");
+          if (!uemail) {
+            const authCust = await getAuthCustomer();
+            if (authCust?.email) uemail = authCust.email;
+          }
           let history = [];
 
-          if (sid || uemail) {
-            try {
-              let rows = [];
-              if (uemail) {
-                const res = await env.DB.prepare("SELECT role, content, created_at FROM chat_history WHERE user_email = ? ORDER BY created_at DESC LIMIT 10").bind(uemail).all();
-                rows = res.results || [];
-              } else if (sid) {
-                const res = await env.DB.prepare("SELECT role, content, created_at FROM chat_history WHERE session_id = ? ORDER BY created_at DESC LIMIT 10").bind(sid).all();
-                rows = res.results || [];
-              }
-              history = rows.reverse();
-            } catch(e) {}
+          if (uemail) {
+            const res = await env.DB.prepare("SELECT role, content, created_at FROM chat_history WHERE LOWER(TRIM(user_email)) = ? ORDER BY created_at DESC LIMIT 10").bind(uemail.toLowerCase().trim()).all();
+            history = (res.results || []).reverse();
+          } else if (sid) {
+            const res = await env.DB.prepare("SELECT role, content, created_at FROM chat_history WHERE session_id = ? ORDER BY created_at DESC LIMIT 10").bind(sid).all();
+            history = (res.results || []).reverse();
           }
 
           return json({ success: true, enabled: Boolean(settings?.ai_enabled ?? 1), faqs, history });
@@ -1570,72 +2551,92 @@ JSON structure:
           const body = await request.json();
           const message = (body.message || "").trim();
           const sessionId = body.session_id || "guest";
-          const userEmail = body.user_email || null;
+          let userEmail = body.user_email || null;
+          if (!userEmail) {
+            const authCust = await getAuthCustomer();
+            if (authCust?.email) userEmail = authCust.email;
+          }
           const clientHistory = Array.isArray(body.history) ? body.history : [];
 
           if (!message) return json({ error: "Message is required" }, 400);
 
           const settings = await env.DB.prepare("SELECT * FROM settings WHERE id = 'general' LIMIT 1").first();
 
-          // 1. Check preset FAQs
+          // 1. Fetch previous 10 messages from DB for context memory
+          let dbHistory = [];
+          if (userEmail) {
+            const res = await env.DB.prepare("SELECT role, content FROM chat_history WHERE LOWER(TRIM(user_email)) = ? ORDER BY created_at DESC LIMIT 10").bind(userEmail.toLowerCase().trim()).all();
+            dbHistory = (res.results || []).reverse();
+          } else if (sessionId && sessionId !== "guest") {
+            const res = await env.DB.prepare("SELECT role, content FROM chat_history WHERE session_id = ? ORDER BY created_at DESC LIMIT 10").bind(sessionId).all();
+            dbHistory = (res.results || []).reverse();
+          }
+
+          const combinedHistory = dbHistory.length > 0 ? dbHistory : clientHistory;
+          const recentTurns = combinedHistory.slice(-10).map(h => ({
+            role: h.role === "assistant" ? "assistant" : "user",
+            content: h.content
+          }));
+
+          // 2. Check preset FAQs (exact match only so normal questions go to live AI)
           if (settings?.chatbot_faqs_json) {
             try {
               const presetFaqs = JSON.parse(settings.chatbot_faqs_json);
-              const cleanMsg = message.toLowerCase();
+              const cleanMsg = message.toLowerCase().trim();
               const matched = presetFaqs.find(f => {
                 const q = (f.question || f.q || "").toLowerCase().trim();
-                return q && (cleanMsg === q || cleanMsg.includes(q) || q.includes(cleanMsg));
+                return q && cleanMsg === q;
               });
-              if (matched) {
+              if (matched && matched.answer) {
                 const ans = matched.answer || matched.a;
-                if (ans) {
-                  try {
-                    const mId1 = "msg_" + Math.random().toString(36).substring(2, 9);
-                    const mId2 = "msg_" + Math.random().toString(36).substring(2, 9);
-                    await env.DB.prepare("INSERT INTO chat_history (id, session_id, user_email, role, content) VALUES (?, ?, ?, 'user', ?)").bind(mId1, sessionId, userEmail, message).run();
-                    await env.DB.prepare("INSERT INTO chat_history (id, session_id, user_email, role, content) VALUES (?, ?, ?, 'assistant', ?)").bind(mId2, sessionId, userEmail, ans).run();
-                  } catch(e) {}
-                  return json({ reply: ans });
-                }
+                try {
+                  const mId1 = "msg_" + Math.random().toString(36).substring(2, 9);
+                  const mId2 = "msg_" + Math.random().toString(36).substring(2, 9);
+                  await env.DB.prepare("INSERT INTO chat_history (id, session_id, user_email, role, content) VALUES (?, ?, ?, 'user', ?)").bind(mId1, sessionId, userEmail, message).run();
+                  await env.DB.prepare("INSERT INTO chat_history (id, session_id, user_email, role, content) VALUES (?, ?, ?, 'assistant', ?)").bind(mId2, sessionId, userEmail, ans).run();
+                } catch(e) {}
+                return json({ reply: ans });
               }
             } catch(e) {}
           }
 
-          // Build context with product links
-          const products = (await env.DB.prepare("SELECT title, slug, price, sale_price, short_description FROM products WHERE status = 'published' LIMIT 12").all()).results || [];
+          // 3. Build context with live products
+          const prodsRes = await env.DB.prepare("SELECT title, slug, price, sale_price, short_description FROM products WHERE status = 'published' LIMIT 15").all();
+          const products = prodsRes.results || [];
           const context = products.map(p => `• [${p.title}](/tools/${p.slug}) (মূল্য: ${p.sale_price || p.price} ৳): ${p.short_description || ''}`).join("\n");
           
+          const customAdminPrompt = (settings?.ai_system_prompt || "").trim();
+
           const sysPrompt = `
-আপনি "ToolsHub BD" (tootls.pages.dev)-এর অফিসিয়াল প্রফেশনাল এআই কাস্টমার সহকারী।
+আপনি "ToolsHub BD" (tootls.pages.dev)-এর অফিসিয়াল এআই সহকারী।
 
 কঠোর নিয়মাবলী:
-১. আপনার উত্তর সবসময় অত্যন্ত সংক্ষিপ্ত, স্পষ্ট এবং টু-দ্য-পয়েন্ট (সর্বোচ্চ ২ থেকে ৩ লাইনের মধ্যে) রাখবেন। কখনোই বড় প্যারাগ্রাফ বা অপ্রয়োজনীয় ব্যাখ্যা দিবেন না।
-২. আপনি শুধুমাত্র ToolsHub BD ওয়েবসাইটের প্রোডাক্ট (ডিজিটাল টুলস, সফটওয়্যার, স্ক্রিপ্ট, কোর্স), মূল্য, পেমেন্ট মেথড (bKash, Nagad, Crypto USDT) এবং অর্ডার/ডাউনলোড সংক্রান্ত তথ্যে সাহায্য করবেন।
+১. আপনার উত্তর সবসময় স্পষ্ট, টু-দ্য-পয়েন্ট এবং আন্তরিক হবে। অপ্রয়োজনীয় দীর্ঘ উত্তর দিবেন না।
+২. আপনি ToolsHub BD ওয়েবসাইটের প্রোডাক্ট (ডিজিটাল টুলস, সফটওয়্যার, স্ক্রিপ্ট, কোর্স), মূল্য, পেমেন্ট মেথড (bKash, Nagad, Crypto USDT) এবং অর্ডার/ডাউনলোড সংক্রান্ত তথ্যে সরাসরি কাস্টমারকে সাহায্য করবেন।
 ৩. যে কোনো প্রোডাক্টের নাম উল্লেখ করার সময় অবশ্যই সেই প্রোডাক্টের টাইটেলটি ক্লিকযোগ্য মার্কডাউন লিংক আকারে লিখবেন: [প্রোডাক্টের নাম](/tools/slug) অথবা চেকআউটের জন্য [এখনই অর্ডার করুন](/checkout/slug)। সাধারণ টেক্সট হিসেবে কখনোই প্রোডাক্টের নাম লিখবেন না, যাতে কাস্টমার ক্লিক করে সরাসরি পেজে চলে যেতে পারে।
-৪. ওয়েবসাইটের বাইরের বা অপ্রাসঙ্গিক কোনো বিষয়ে প্রশ্ন করা হলে বিনয়ের সাথে সংক্ষিপ্ত উত্তর দিন:
-"দুঃখিত, আমি শুধুমাত্র ToolsHub BD-এর প্রোডাক্ট, অর্ডার এবং সার্ভিস সম্পর্কিত বিষয়ে সাহায্য করতে পারি। আপনি কি কোনো টুলস সম্পর্কে জানতে চান?"
+৪. কাস্টমার আগের মেসেজে যা বলেছে তা মনে রাখবেন এবং সেই কথোপকথনের ধারাবাহিকতা বজায় রেখে প্রাসঙ্গিকভাবে উত্তর দিবেন।
 ৫. পণ্যের তালিকা দিলে সুন্দর বুলেট ও লাইন ব্রেক ব্যবহার করবেন।
 
-আমাদের ডিজিটাল টুলস ও কোর্সের বর্তমান তালিকা:
+আমাদের বর্তমান ডিজিটাল টুলস ও কোর্সের তালিকা:
 ${context}
 
 পেমেন্ট মেথড:
 • bKash (Send Money)
 • Nagad (Send Money)
 • Crypto (USDT TRC20 / BEP20)
+${customAdminPrompt ? `\n\nঅ্যাডমিন কর্তৃক বিশেষ নির্দেশনা:\n${customAdminPrompt}` : ''}
 `.trim();
 
           let reply = "";
-          const recentTurns = clientHistory.slice(-6);
 
-          // 2. OpenRouter provider
+          // 4. OpenRouter provider with automatic fallback
           if (settings?.ai_provider === "openrouter" && settings?.ai_api_key) {
             let m = (settings.ai_model || "").trim();
-            if (!m) {
-              m = "minimax/minimax-m3.1-flash:free";
+            if (!m || m.includes(":batch")) {
+              m = "google/gemini-3.8-flash";
             }
 
-            try {
+            const callOpenRouter = async (modelName) => {
               const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
                 method: "POST",
                 headers: {
@@ -1645,26 +2646,36 @@ ${context}
                   "X-Title": "ToolsHub BD"
                 },
                 body: JSON.stringify({
-                  model: m,
+                  model: modelName,
                   messages: [
                     { role: "system", content: sysPrompt },
-                    ...recentTurns.map(h => ({ role: h.role === "assistant" ? "assistant" : "user", content: h.content })),
+                    ...recentTurns,
                     { role: "user", content: message }
                   ],
-                  max_tokens: 280,
-                  temperature: 0.5
+                  max_tokens: 450,
+                  temperature: 0.6
                 })
               });
+              if (!res.ok) throw new Error("OpenRouter HTTP " + res.status);
               const d = await res.json();
-              if (d.choices?.[0]?.message?.content) {
-                reply = d.choices[0].message.content.trim();
+              return d.choices?.[0]?.message?.content?.trim() || "";
+            };
+
+            try {
+              reply = await callOpenRouter(m);
+            } catch (e1) {
+              console.error("OpenRouter primary failed (" + m + "):", e1);
+              if (m !== "minimax/minimax-m3.1-flash:free") {
+                try {
+                  reply = await callOpenRouter("minimax/minimax-m3.1-flash:free");
+                } catch (e2) {
+                  console.error("OpenRouter fallback failed:", e2);
+                }
               }
-            } catch(e) {
-              console.error("OpenRouter error in worker:", e);
             }
           }
 
-          // 3. Google Gemini provider
+          // 5. Google Gemini provider
           if (!reply && settings?.ai_provider === "gemini" && settings?.ai_api_key) {
             const m = settings.ai_model || "gemini-1.5-flash";
             try {
@@ -1687,23 +2698,21 @@ ${context}
             }
           }
 
-          // 4. Smart fallback if needed
+          // 6. Intelligent Fallback if AI is completely unreachable
           if (!reply) {
             const lower = message.toLowerCase();
             if (lower.includes("বিকাশ") || lower.includes("নগদ") || lower.includes("পেমেন্ট") || lower.includes("টাকা")) {
               reply = "আমাদের সাইটে বিকাশ (Send Money), নগদ (Send Money) এবং ক্রিপ্টো (USDT TRC20) এর মাধ্যমে পেমেন্ট করতে পারেন। পছন্দমতো টুলসের 'কিনুন' বাটনে ক্লিক করে TrxID দিয়ে অর্ডার কনফার্ম করুন।";
             } else if (lower.includes("ডাউনলোড") || lower.includes("ড্রাইভ") || lower.includes("access") || lower.includes("ফাইল")) {
               reply = "পেমেন্ট অ্যাপ্রুভ হওয়ার সাথে সাথেই ট্র্যাকিং পেজে ও ড্যাশবোর্ডে ডাউনলোড লিংক অথবা 'Access Now' ড্রাইভ বাটন সক্রিয় হবে। 'অর্ডার ট্র্যাক' পেজে যেকোনো সময় চেক করতে পারেন।";
-            } else if (lower.includes("প্রোডাক্ট") || lower.includes("product") || lower.includes("টুলস") || lower.includes("কি কি")) {
-              reply = "আমাদের স্টোরে রয়েছে:\n• Facebook Lead Scraper Pro (৳৯৫০)\n• SEO Backlink Indexer & Booster (৳১৪০০)\n• Next.js FullStack SaaS Starter Kit (৳২৪০০)\n• WhatsApp AI Support Bot (৳১৮০০)\nহোমপেজে সব টুলসের বিস্তারিত বিবরণ দেখতে পারেন।";
-            } else if (lower.includes("হাই") || lower.includes("হ্যালো") || lower.includes("hello") || lower.includes("hi") || lower.includes("সালাম")) {
-              reply = "আসসালামু আলাইকুম! ToolsHub BD-তে আপনাকে স্বাগতম। আপনি কোন ডিজিটাল টুলস সম্পর্কে জানতে চান বা কীভাবে বিকাশ/নগদে অর্ডার করবেন সাহায্য করতে পারি?";
+            } else if (lower.includes("ডিসকাউন্ট") || lower.includes("ছাড়") || lower.includes("কম") || lower.includes("discount")) {
+              reply = customAdminPrompt || "আমাদের প্রোডাক্টগুলোতে ইতিমধ্যে সর্বোচ্চ ছাড় দেওয়া আছে। আপনি চেকআউট পেজে কোনো প্রমো কোড থাকলে প্রয়োগ করতে পারেন।";
             } else {
               reply = "ToolsHub BD-তে আপনাকে স্বাগতম! আমাদের প্রিমিয়াম ডিজিটাল টুলস, স্ক্রিপ্ট ও কোর্স সম্পর্কে বিস্তারিত জানতে পারেন। কোন টুলসটি কিনতে আগ্রহী?";
             }
           }
 
-          // Persist to chat_history table
+          // 7. Persist to chat_history table
           try {
             const mId1 = "msg_" + Math.random().toString(36).substring(2, 9);
             const mId2 = "msg_" + Math.random().toString(36).substring(2, 9);
@@ -1821,43 +2830,30 @@ ${context}
           return new Response("<!DOCTYPE html><html lang='bn'><head><meta charset='utf-8'><title>404 Not Found</title></head><body style='font-family:sans-serif;text-align:center;padding:50px;'><h1>404 — টুলস বা প্রোডাক্টটি পাওয়া যায়নি</h1><p>এই প্রোডাক্টটি মুছে ফেলা হয়েছে বা লিংকটি পরিবর্তিত হয়েছে।</p><a href='/' style='color:#4f46e5;font-weight:bold;'>← হোমপেজে ফিরে যান</a></body></html>", {
             status: 404,
             headers: {
-              "Content-Type": "text/html; charset=utf-8"
+              "Content-Type": "text/html; charset=utf-8",
+              "Cache-Control": "no-cache, no-store, must-revalidate"
             }
           });
         }
 
-        // 2. If product exists, try serving pre-rendered static page
+        const settings = await env.DB.prepare("SELECT * FROM settings WHERE id = 'general' LIMIT 1").first();
+        const relRes = await env.DB.prepare("SELECT * FROM products WHERE id != ? AND status = 'published' LIMIT 4").bind(prod.id).all();
+        const related = relRes.results || [];
+        
+        const title = prod.title || "ডিজিটাল টুলস";
+        const desc = prod.short_description || prod.description || "";
+        const price = prod.price || 0;
+        const salePrice = prod.sale_price || price;
+        const discount = price > salePrice ? Math.round(((price - salePrice) / price) * 100) : 0;
+        const thumb = prod.thumbnail_url || "/placeholder.svg";
+        let features = [];
         try {
-          const staticReq = new Request(new URL(`/tools/${slug}.html`, request.url));
-          const staticRes = await env.ASSETS.fetch(staticReq);
-          if (staticRes.status === 200) {
-            return new Response(staticRes.body, {
-              status: 200,
-              headers: {
-                "Content-Type": "text/html; charset=utf-8",
-                "Cache-Control": "public, max-age=3600, stale-while-revalidate=86400"
-              }
-            });
-          }
-        } catch(e) {}
-          const settings = await env.DB.prepare("SELECT * FROM settings WHERE id = 'general' LIMIT 1").first();
-          const relRes = await env.DB.prepare("SELECT * FROM products WHERE id != ? AND status = 'published' LIMIT 4").bind(prod.id).all();
-          const related = relRes.results || [];
-          
-          const title = prod.title || "ডিজিটাল টুলস";
-          const desc = prod.short_description || prod.description || "";
-          const price = prod.price || 0;
-          const salePrice = prod.sale_price || price;
-          const discount = price > salePrice ? Math.round(((price - salePrice) / price) * 100) : 0;
-          const thumb = prod.thumbnail_url || "/placeholder.svg";
-          let features = [];
-          try {
-            features = typeof prod.features_json === "string" ? JSON.parse(prod.features_json) : (prod.features_json || []);
-          } catch(e) { features = []; }
-          const isSub = prod.billing_type === "subscription";
-          const cycleText = prod.subscription_period === "1_month" ? "১ মাস মেয়াদ" : prod.subscription_period === "1_year" ? "১ বছর মেয়াদ" : "সাবস্ক্রিপশন";
+          features = typeof prod.features_json === "string" ? JSON.parse(prod.features_json) : (prod.features_json || []);
+        } catch(e) { features = []; }
+        const isSub = prod.billing_type === "subscription";
+        const cycleText = prod.subscription_period === "1_month" ? "১ মাস মেয়াদ" : prod.subscription_period === "1_year" ? "১ বছর মেয়াদ" : "সাবস্ক্রিপশন";
 
-          const html = `<!DOCTYPE html>
+        const html = `<!DOCTYPE html>
 <html lang="bn">
 <head>
   <meta charset="utf-8">
@@ -1880,7 +2876,7 @@ ${context}
     })();
   </script>
   <!-- Compiled Pre-built CSS (Zero render-blocking CDN) -->
-  <link rel="stylesheet" href="/_next/static/css/875f262ed21bc1de.css">
+  <link rel="stylesheet" href="/_next/static/css/__NEXT_CSS_FILE__">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@400;600;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
@@ -1904,6 +2900,7 @@ ${context}
         <a href="/#tools" class="hover:text-indigo-600 dark:hover:text-white transition-colors">টুলস</a>
         <a href="/#features" class="hover:text-indigo-600 dark:hover:text-white transition-colors">ফিচার</a>
         <a href="/track-order" class="hover:text-indigo-600 dark:hover:text-white transition-colors">অর্ডার ট্র্যাকিং</a>
+        <a href="/contact" class="hover:text-indigo-600 dark:hover:text-white transition-colors">যোগাযোগ</a>
       </div>
       <div class="flex items-center gap-3">
         <a href="/login" class="px-4 py-2 rounded-xl text-xs font-bold text-slate-700 dark:text-slate-300 hover:text-indigo-600 dark:hover:text-white bg-slate-100 dark:bg-slate-800 transition-colors">লগইন</a>
@@ -2054,42 +3051,530 @@ ${context}
       <p>নিরাপদ পেমেন্ট • আল্ট্রা-ফাস্ট এজ ডেলিভারি • ২৪/৭ সাপোর্ট</p>
     </div>
   </footer>
+
+  ${renderFloatingAIChatbotHtml()}
 </body>
 </html>`;
 
           return new Response(html, {
             headers: {
               "Content-Type": "text/html; charset=utf-8",
-              "Cache-Control": "public, max-age=60"
+              "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+              "CDN-Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+              "Cloudflare-CDN-Cache-Control": "no-cache, no-store, must-revalidate, max-age=0"
             }
           });
       }
     }
 
     // -------------------------------------------------------------
-    // Dynamic Checkout Handler: /checkout/:slug
+    // Dynamic Checkout Handler: /checkout/:slug (Server-Side Rendered)
     // -------------------------------------------------------------
     if (pathname.startsWith("/checkout/")) {
       const slug = pathname.replace("/checkout/", "").replace(/\/$/, "");
       if (slug) {
-        let templateReq = new Request(new URL(`/checkout/${slug}.html`, request.url));
-        let res = await env.ASSETS.fetch(templateReq);
-        if (res.status === 200) {
-          return res;
-        }
-        templateReq = new Request(new URL("/checkout/mouza-map.html", request.url));
-        res = await env.ASSETS.fetch(templateReq);
-        if (res.status === 200) {
-          const rawHtml = await res.text();
-          const customizedHtml = rawHtml.replaceAll("mouza-map", slug);
-          return new Response(customizedHtml, {
-            status: 200,
-            headers: {
-              "Content-Type": "text/html; charset=utf-8",
-              "Cache-Control": "public, max-age=60"
-            }
+        const cleanSlug = decodeURIComponent(slug).toLowerCase().trim();
+        const prod = await env.DB.prepare("SELECT * FROM products WHERE (slug = ? OR id = ? OR LOWER(slug) = ?) AND status = 'published' LIMIT 1")
+          .bind(slug, slug, cleanSlug).first();
+
+        if (!prod) {
+          return new Response("<!DOCTYPE html><html lang='bn'><head><meta charset='utf-8'><title>404 Not Found — ToolsHub BD</title></head><body style='font-family:sans-serif;text-align:center;padding:50px;background:#f8fafc;color:#1e293b;'><h1>404 — প্রোডাক্টটি পাওয়া যায়নি</h1><p>চেকআউট করতে চাওয়া টুলসটি পাওয়া যায়নি বা স্টকে নেই।</p><a href='/' style='display:inline-block;margin-top:16px;padding:10px 20px;background:#4f46e5;color:#ffffff;border-radius:8px;text-decoration:none;font-weight:bold;'>← হোমপেজে ফিরে যান</a></body></html>", {
+            status: 404,
+            headers: { "Content-Type": "text/html; charset=utf-8" }
           });
         }
+
+        const gwsRes = await env.DB.prepare("SELECT * FROM payment_gateways WHERE is_enabled = 1 ORDER BY sort_order ASC").all();
+        const gateways = gwsRes.results || [];
+        const authUser = await getAuthCustomer();
+
+        const title = prod.title || "ডিজিটাল টুলস";
+        const desc = prod.short_description || prod.description || "";
+        const basePrice = prod.sale_price || prod.price || 0;
+        const origPrice = prod.price || basePrice;
+        const discount = origPrice > basePrice ? Math.round(((origPrice - basePrice) / origPrice) * 100) : 0;
+        const isSub = prod.billing_type === "subscription";
+        const cycleText = prod.subscription_period === "1_month" ? "১ মাস মেয়াদ" : prod.subscription_period === "1_year" ? "১ বছর মেয়াদ" : "সাবস্ক্রিপশন";
+        const thumb = prod.thumbnail_url || "/placeholder.svg";
+
+        let features = [];
+        try {
+          features = typeof prod.features_json === "string" ? JSON.parse(prod.features_json) : (prod.features_json || []);
+        } catch(e) {}
+
+        const checkoutHtml = `<!DOCTYPE html>
+<html lang="bn">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>চেকআউট — ${title} | ToolsHub BD</title>
+  <meta name="description" content="নিরাপদ পেমেন্ট ও ইনস্ট্যান্ট ডেলিভারি — ${title}">
+  <script>
+    (function(){
+      try {
+        var t = localStorage.getItem("theme");
+        if (t === "dark") document.documentElement.classList.add("dark");
+        else document.documentElement.classList.remove("dark");
+      } catch(e) {}
+    })();
+  </script>
+  <link rel="stylesheet" href="/_next/static/css/__NEXT_CSS_FILE__">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@400;600;700&display=swap" rel="stylesheet">
+  <style>
+    body { font-family: 'Hind Siliguri', -apple-system, BlinkMacSystemFont, sans-serif; }
+  </style>
+</head>
+<body class="bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 min-h-screen flex flex-col justify-between transition-colors">
+  <!-- Header -->
+  <header class="border-b border-slate-200 dark:border-slate-800 bg-white/90 dark:bg-slate-900/90 backdrop-blur-md sticky top-0 z-50">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+      <a href="/" class="flex items-center gap-2.5">
+        <div class="w-9 h-9 rounded-xl bg-indigo-600 flex items-center justify-center text-white font-extrabold shadow-md shadow-indigo-600/30">
+          ⚡
+        </div>
+        <span class="font-black text-lg tracking-tight text-slate-900 dark:text-white">ToolsHub <span class="text-indigo-600 dark:text-indigo-400">BD</span></span>
+      </a>
+      <div class="hidden sm:flex items-center gap-6 text-sm font-semibold text-slate-600 dark:text-slate-300">
+        <a href="/" class="hover:text-indigo-600 dark:hover:text-white transition-colors">হোম</a>
+        <a href="/#tools" class="hover:text-indigo-600 dark:hover:text-white transition-colors">টুলস</a>
+        <a href="/track-order" class="hover:text-indigo-600 dark:hover:text-white transition-colors">অর্ডার ট্র্যাকিং</a>
+        <a href="/contact" class="hover:text-indigo-600 dark:hover:text-white transition-colors">যোগাযোগ</a>
+      </div>
+      <div class="flex items-center gap-3">
+        ${authUser ? `
+          <a href="/dashboard" class="px-4 py-2 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 transition-colors shadow-md shadow-indigo-600/25 flex items-center gap-1.5">
+            <span>👤 ড্যাশবোর্ড</span>
+          </a>
+        ` : `
+          <a href="/login" class="px-4 py-2 rounded-xl text-xs font-bold text-slate-700 dark:text-slate-300 hover:text-indigo-600 dark:hover:text-white bg-slate-100 dark:bg-slate-800 transition-colors">লগইন</a>
+        `}
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Checkout Container -->
+  <main class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-12 space-y-8 flex-1 w-full">
+    <!-- Back to product link -->
+    <div>
+      <a href="/tools/${prod.slug}" class="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-500 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">
+        ← টুলস বিবরণে ফিরে যান
+      </a>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+      <!-- Left Column: Checkout Form (7 Cols) -->
+      <div class="lg:col-span-7 space-y-6">
+        <form id="checkout_form" class="space-y-6">
+          <!-- Step 1: Customer Info -->
+          <div class="p-6 sm:p-8 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm space-y-5">
+            <div class="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
+              <h2 class="text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                <span>১. আপনার তথ্য</span>
+              </h2>
+              ${authUser ? `
+                <span class="text-xs text-emerald-600 dark:text-emerald-400 font-semibold bg-emerald-50 dark:bg-emerald-950/60 px-2.5 py-1 rounded-full border border-emerald-200 dark:border-emerald-800">
+                  ✓ লগইন করা আছেন
+                </span>
+              ` : `
+                <span class="text-xs text-slate-400">অর্ডার ও ডেলিভারির জন্য</span>
+              `}
+            </div>
+
+            <div class="space-y-4">
+              <div>
+                <label class="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">আপনার নাম *</label>
+                <input type="text" id="cust_name" required value="${authUser?.name || ''}" placeholder="যেমন: মো: সোহাগ" class="w-full px-4 py-3 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 text-sm text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500">
+              </div>
+
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label class="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">ইমেইল ঠিকানা *</label>
+                  <input type="email" id="cust_email" required value="${authUser?.email || ''}" placeholder="name@example.com" class="w-full px-4 py-3 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 text-sm text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                </div>
+
+                <div>
+                  <label class="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">ফোন / হোয়াটসঅ্যাপ নম্বর *</label>
+                  <input type="text" id="cust_phone" required placeholder="01XXXXXXXXX" class="w-full px-4 py-3 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 text-sm text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                </div>
+              </div>
+
+              ${!authUser ? `
+              <div class="pt-2">
+                <label class="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+                  একটি পাসওয়ার্ড সেট করুন <span class="text-indigo-600 dark:text-indigo-400 font-bold">(অ্যাকাউন্ট স্বয়ংক্রিয় তৈরি হবে)</span> *
+                </label>
+                <input type="password" id="cust_password" required minlength="6" placeholder="কমপক্ষে ৬ অক্ষরের একটি পাসওয়ার্ড দিন" class="w-full px-4 py-3 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 text-sm text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                <p class="text-[11px] text-slate-400 mt-1">এই পাসওয়ার্ড দিয়ে অর্ডার সম্পন্ন হলে সরাসরি ড্যাশবোর্ডে লগইন করে আপনার সব কেনা প্রোডাক্ট ডাউনলোড করতে পারবেন।</p>
+              </div>
+              ` : ''}
+            </div>
+          </div>
+
+          <!-- Step 2: Payment Method Selection -->
+          <div class="p-6 sm:p-8 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm space-y-5">
+            <div class="pb-3 border-b border-slate-100 dark:border-slate-800">
+              <h2 class="text-lg font-bold text-slate-900 dark:text-white">২. পেমেন্ট মাধ্যম বেছে নিন</h2>
+              <p class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">নিচের যেকোনো মাধ্যমে টাকা পাঠিয়ে TrxID প্রদান করুন</p>
+            </div>
+
+            <!-- Gateway Tabs -->
+            <div class="grid grid-cols-2 sm:grid-cols-3 gap-3" id="gw_selector_container">
+              ${gateways.map((g, idx) => `
+                <button type="button" onclick="switchGateway('${g.id}')" id="gw_tab_${g.id}" class="gw-tab p-3.5 rounded-2xl border text-center transition-all flex flex-col items-center justify-center gap-1 cursor-pointer ${idx === 0 ? 'border-indigo-600 bg-indigo-50/50 dark:bg-indigo-950/40 text-indigo-600 dark:text-indigo-400 font-bold' : 'border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/40 text-slate-700 dark:text-slate-300 hover:border-slate-300'}">
+                  <span class="text-base font-bold">${g.title}</span>
+                  <span class="text-[10px] px-2 py-0.5 rounded-full bg-slate-200/70 dark:bg-slate-700/60 text-slate-600 dark:text-slate-300 font-medium">${g.account_type || 'Personal'}</span>
+                </button>
+              `).join('')}
+            </div>
+
+            <!-- Dynamic Gateway Instructions Box -->
+            <div class="p-5 rounded-2xl bg-indigo-50/60 dark:bg-slate-800/80 border border-indigo-100 dark:border-slate-700 space-y-4">
+              <div class="flex items-center justify-between flex-wrap gap-2">
+                <div>
+                  <span class="text-xs text-slate-500 dark:text-slate-400 block font-medium">নির্ধারিত নম্বর / একাউন্ট এড্রেস:</span>
+                  <div class="flex items-center gap-2 mt-0.5">
+                    <span id="active_acc_number" class="text-lg sm:text-xl font-black font-mono text-slate-900 dark:text-white">
+                      ${gateways[0]?.account_number || '01700-000000'}
+                    </span>
+                    <span id="active_acc_type" class="text-xs px-2.5 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-900/60 text-indigo-700 dark:text-indigo-300 font-bold">
+                      ${gateways[0]?.account_type || 'Personal'}
+                    </span>
+                  </div>
+                </div>
+
+                <button type="button" onclick="copyAccountNumber()" id="copy_btn" class="px-3.5 py-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-xs font-bold text-slate-700 dark:text-slate-200 shadow-sm transition-all flex items-center gap-1.5 cursor-pointer">
+                  <span>📋</span>
+                  <span id="copy_btn_text">কপি করুন</span>
+                </button>
+              </div>
+
+              <div class="p-3.5 rounded-xl bg-white/70 dark:bg-slate-900/70 border border-indigo-100/60 dark:border-slate-800 text-xs text-slate-600 dark:text-slate-300 leading-relaxed whitespace-pre-line" id="active_instructions">
+                ${gateways[0]?.instructions || '১. আপনার পেমেন্ট অ্যাপে প্রবেশ করুন।\\n২. সঠিক পরিমাণ টাকা Send Money করুন।\\n৩. ট্রানজেকশন আইডি নিচে দিয়ে সাবমিট করুন।'}
+              </div>
+            </div>
+
+            <!-- Transaction Inputs -->
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
+              <div>
+                <label class="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+                  যে নম্বর / ওয়ালেট থেকে টাকা পাঠিয়েছেন *
+                </label>
+                <input type="text" id="sender_number" required placeholder="আপনার বিকাশ / নগদ নম্বর" class="w-full px-4 py-3 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 text-sm text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500">
+              </div>
+
+              <div>
+                <label class="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+                  Transaction ID (TrxID) *
+                </label>
+                <input type="text" id="transaction_id" required placeholder="যেমন: 8N7K6D5E9A" class="w-full px-4 py-3 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 text-sm text-slate-900 dark:text-white font-mono uppercase focus:outline-none focus:ring-2 focus:ring-indigo-500">
+              </div>
+            </div>
+          </div>
+
+          <!-- Step 3: Promo / Coupon Code -->
+          <div class="p-6 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm space-y-3">
+            <label class="block text-xs font-semibold text-slate-700 dark:text-slate-300">
+              প্রমো বা ডিসকাউন্ট কুপন কোড (যদি থাকে)
+            </label>
+            <div class="flex items-center gap-2">
+              <input type="text" id="coupon_input" placeholder="কুপন কোড লিখুন..." class="flex-1 px-4 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 text-xs font-mono uppercase text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500">
+              <button type="button" onclick="applyPromoCode()" id="apply_coupon_btn" class="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-md transition-colors shrink-0">
+                প্রয়োগ করুন
+              </button>
+            </div>
+            <div id="coupon_alert" class="hidden text-xs p-3 rounded-xl"></div>
+          </div>
+
+          <!-- Error Alert Banner -->
+          <div id="form_error_banner" class="hidden p-4 rounded-2xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/60 text-rose-600 dark:text-rose-400 text-xs font-semibold leading-relaxed"></div>
+
+          <!-- Submit Order Button -->
+          <button type="submit" id="submit_order_btn" class="w-full py-4 px-6 rounded-2xl bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white font-extrabold text-sm sm:text-base shadow-xl shadow-indigo-600/30 transition-all flex items-center justify-center gap-2 cursor-pointer">
+            <span id="btn_spinner" class="hidden animate-spin">⏳</span>
+            <span id="btn_text">অর্ডার নিশ্চিত করুন (৳<span id="btn_total_amount">${basePrice}</span>)</span>
+            <span>→</span>
+          </button>
+
+          <p class="text-center text-xs text-slate-400 pt-1 flex items-center justify-center gap-2">
+            <span>🔒 ১০০% ভেরিফাইড লেনদেন</span>
+            <span>•</span>
+            <span>ইনস্ট্যান্ট অটোমেটেড ডেলিভারি</span>
+          </p>
+        </form>
+      </div>
+
+      <!-- Right Column: Product & Order Summary (5 Cols) -->
+      <div class="lg:col-span-5 sticky top-24 space-y-6">
+        <div class="p-6 sm:p-8 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xl space-y-6">
+          <div class="flex gap-4 items-start">
+            <div class="w-20 h-20 rounded-2xl overflow-hidden bg-slate-100 dark:bg-slate-800 shrink-0 border border-slate-200 dark:border-slate-700">
+              <img src="${thumb}" alt="${title}" class="w-full h-full object-cover">
+            </div>
+            <div class="space-y-1 flex-1">
+              <span class="inline-block px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800">
+                ${isSub ? cycleText : 'লাইফটাইম এক্সেস'}
+              </span>
+              <h3 class="font-extrabold text-base text-slate-900 dark:text-white leading-snug line-clamp-2">${title}</h3>
+              <p class="text-xs text-slate-500 dark:text-slate-400 line-clamp-1">${desc}</p>
+            </div>
+          </div>
+
+          <!-- Price Breakdown -->
+          <div class="space-y-3 pt-4 border-t border-slate-100 dark:border-slate-800 text-xs">
+            <div class="flex items-center justify-between text-slate-500 dark:text-slate-400">
+              <span>মূল মূল্য</span>
+              <span class="font-semibold text-slate-700 dark:text-slate-200">৳${origPrice}</span>
+            </div>
+
+            ${discount > 0 ? `
+            <div class="flex items-center justify-between text-slate-500 dark:text-slate-400">
+              <span>রেগুলার ডিসকাউন্ট</span>
+              <span class="font-bold text-pink-600 dark:text-pink-400">-${discount}% (৳${origPrice - basePrice})</span>
+            </div>
+            ` : ''}
+
+            <div class="flex items-center justify-between text-slate-500 dark:text-slate-400">
+              <span>প্রমো কুপন ছাড়</span>
+              <span id="summary_promo_discount" class="font-bold text-emerald-600 dark:text-emerald-400">-৳০</span>
+            </div>
+
+            <div class="pt-3 border-t border-slate-200 dark:border-slate-800 flex items-baseline justify-between">
+              <div>
+                <span class="text-xs text-slate-500 dark:text-slate-400 block font-medium">সর্বমোট প্রদেয়:</span>
+                <span class="text-[10px] text-emerald-600 dark:text-emerald-400 font-bold">✓ ভ্যাট/ট্যাক্স অন্তর্ভুক্ত</span>
+              </div>
+              <div class="flex items-baseline gap-1">
+                <span class="text-2xl sm:text-3xl font-black text-indigo-600 dark:text-indigo-400">৳<span id="summary_final_total">${basePrice}</span></span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Feature Bullets -->
+          ${features.length > 0 ? `
+          <div class="pt-4 border-t border-slate-100 dark:border-slate-800 space-y-2">
+            <span class="text-xs font-bold text-slate-800 dark:text-slate-200 block">এই অর্ডারে পাচ্ছেন:</span>
+            <div class="space-y-1.5">
+              ${features.slice(0, 4).map(f => `
+                <div class="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
+                  <span class="text-emerald-500 font-bold">✓</span>
+                  <span>${f}</span>
+                </div>
+              `).join('')}
+            </div>
+          </div>
+          ` : ''}
+
+          <!-- Support Guarantee -->
+          <div class="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700/60 space-y-2 text-xs text-slate-500 dark:text-slate-400">
+            <div class="flex items-center gap-2">
+              <span class="text-indigo-500 font-bold">⚡</span>
+              <span>পেমেন্ট ভেরিফাই হওয়ার সাথে সাথে ডাউনলোড সক্রিয়</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <span class="text-indigo-500 font-bold">💬</span>
+              <span>২৪/৭ লাইভ এআই সাপোর্ট ও কাস্টমার হেল্পডেস্ক</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Footer -->
+  <footer class="border-t border-slate-200 dark:border-slate-800/80 bg-white dark:bg-slate-900/50 py-8 text-center text-xs text-slate-500">
+    <div class="max-w-7xl mx-auto px-4 space-y-2">
+      <p>© 2026 ToolsHub BD. সর্বস্বত্ব সংরক্ষিত।</p>
+      <p>নিরাপদ পেমেন্ট • ইনস্ট্যান্ট এজ ডেলিভারি • ২৪/৭ সাপোর্ট</p>
+    </div>
+  </footer>
+
+  <!-- Interactive JavaScript Logic -->
+  <script>
+    var gateways = ${JSON.stringify(gateways)};
+    var selectedGateway = gateways.length > 0 ? gateways[0] : null;
+    var baseAmount = ${basePrice};
+    var promoDiscountAmount = 0;
+    var appliedPromoCode = null;
+
+    function switchGateway(gwId) {
+      var found = gateways.find(function(g){ return g.id === gwId; });
+      if (!found) return;
+      selectedGateway = found;
+
+      // Update Tab Styles
+      var tabs = document.querySelectorAll(".gw-tab");
+      tabs.forEach(function(t){
+        t.className = "gw-tab p-3.5 rounded-2xl border text-center transition-all flex flex-col items-center justify-center gap-1 cursor-pointer border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/40 text-slate-700 dark:text-slate-300 hover:border-slate-300";
+      });
+      var activeTab = document.getElementById("gw_tab_" + gwId);
+      if (activeTab) {
+        activeTab.className = "gw-tab p-3.5 rounded-2xl border text-center transition-all flex flex-col items-center justify-center gap-1 cursor-pointer border-indigo-600 bg-indigo-50/50 dark:bg-indigo-950/40 text-indigo-600 dark:text-indigo-400 font-bold";
+      }
+
+      // Update instructions & account number
+      var accEl = document.getElementById("active_acc_number");
+      var typeEl = document.getElementById("active_acc_type");
+      var instEl = document.getElementById("active_instructions");
+      if (accEl) accEl.innerText = found.account_number || "N/A";
+      if (typeEl) typeEl.innerText = found.account_type || "Personal";
+      if (instEl) instEl.innerText = found.instructions || "";
+    }
+
+    function copyAccountNumber() {
+      if (!selectedGateway || !selectedGateway.account_number) return;
+      navigator.clipboard.writeText(selectedGateway.account_number).then(function(){
+        var btnText = document.getElementById("copy_btn_text");
+        if (btnText) {
+          btnText.innerText = "✓ কপি হয়েছে!";
+          setTimeout(function(){ btnText.innerText = "কপি করুন"; }, 2000);
+        }
+      }).catch(function(){});
+    }
+
+    function applyPromoCode() {
+      var inp = document.getElementById("coupon_input");
+      var alertBox = document.getElementById("coupon_alert");
+      if (!inp || !alertBox) return;
+      var code = inp.value.trim();
+      if (!code) {
+        alertBox.className = "text-xs p-3 rounded-xl bg-amber-50 text-amber-700 border border-amber-200";
+        alertBox.innerText = "অনুগ্রহ করে একটি কুপন কোড লিখুন।";
+        alertBox.classList.remove("hidden");
+        return;
+      }
+
+      var btn = document.getElementById("apply_coupon_btn");
+      if (btn) btn.innerText = "যাচাই হচ্ছে...";
+
+      fetch("/api/promo/validate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          code: code,
+          amount: baseAmount,
+          product_slug: "${prod.slug}"
+        })
+      }).then(function(r){ return r.json(); })
+        .then(function(d){
+          if (btn) btn.innerText = "প্রয়োগ করুন";
+          if (d.valid) {
+            appliedPromoCode = d.code;
+            promoDiscountAmount = d.discount_amount || 0;
+            var finalPay = Math.max(0, baseAmount - promoDiscountAmount);
+
+            alertBox.className = "text-xs p-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800";
+            alertBox.innerText = d.message || "কুপন কোড সফলভাবে যুক্ত হয়েছে!";
+            alertBox.classList.remove("hidden");
+
+            // Update UI totals
+            var promoEl = document.getElementById("summary_promo_discount");
+            var finalEl = document.getElementById("summary_final_total");
+            var btnTotal = document.getElementById("btn_total_amount");
+            if (promoEl) promoEl.innerText = "-৳" + promoDiscountAmount;
+            if (finalEl) finalEl.innerText = finalPay;
+            if (btnTotal) btnTotal.innerText = finalPay;
+          } else {
+            alertBox.className = "text-xs p-3 rounded-xl bg-rose-50 dark:bg-rose-950/50 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800";
+            alertBox.innerText = d.error || "ভুল বা অকার্যকর কুপন কোড।";
+            alertBox.classList.remove("hidden");
+          }
+        }).catch(function(){
+          if (btn) btn.innerText = "প্রয়োগ করুন";
+          alertBox.className = "text-xs p-3 rounded-xl bg-rose-50 text-rose-700 border border-rose-200";
+          alertBox.innerText = "কুপন যাচাই করতে সমস্যা হয়েছে।";
+          alertBox.classList.remove("hidden");
+        });
+    }
+
+    document.getElementById("checkout_form").addEventListener("submit", function(e){
+      e.preventDefault();
+      var errBox = document.getElementById("form_error_banner");
+      if (errBox) errBox.classList.add("hidden");
+
+      var name = document.getElementById("cust_name").value.trim();
+      var email = document.getElementById("cust_email").value.trim();
+      var phone = document.getElementById("cust_phone").value.trim();
+      var sender = document.getElementById("sender_number").value.trim();
+      var trx = document.getElementById("transaction_id").value.trim();
+      var passInput = document.getElementById("cust_password");
+      var pass = passInput ? passInput.value : "";
+
+      if (!name || !email || !phone || !trx) {
+        if (errBox) {
+          errBox.innerText = "অনুগ্রহ করে আপনার নাম, ইমেইল, ফোন এবং TrxID প্রদান করুন।";
+          errBox.classList.remove("hidden");
+        }
+        return;
+      }
+
+      if (passInput && pass.length < 6) {
+        if (errBox) {
+          errBox.innerText = "অ্যাকাউন্ট তৈরির জন্য অনুগ্রহ করে কমপক্ষে ৬ অক্ষরের পাসওয়ার্ড দিন।";
+          errBox.classList.remove("hidden");
+        }
+        return;
+      }
+
+      var submitBtn = document.getElementById("submit_order_btn");
+      var spinner = document.getElementById("btn_spinner");
+      var btnText = document.getElementById("btn_text");
+      if (submitBtn) submitBtn.disabled = true;
+      if (spinner) spinner.classList.remove("hidden");
+      if (btnText) btnText.innerText = "অর্ডার প্রসেসিং হচ্ছে...";
+
+      fetch("/api/orders/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          product_slug: "${prod.slug}",
+          product_id: "${prod.id}",
+          customer_name: name,
+          customer_email: email,
+          customer_phone: phone,
+          payment_method: selectedGateway ? selectedGateway.id : "bkash",
+          sender_number: sender,
+          transaction_id: trx,
+          coupon_code: appliedPromoCode,
+          password: pass || undefined
+        })
+      }).then(function(r){ return r.json(); })
+        .then(function(data){
+          if (data && data.success) {
+            window.location.href = "/order-success?order_number=" + encodeURIComponent(data.order_number) + "&token=" + encodeURIComponent(data.download_token || "") + "&new_account=" + (data.new_account_created ? "1" : "0") + "&email=" + encodeURIComponent(email);
+          } else {
+            if (submitBtn) submitBtn.disabled = false;
+            if (spinner) spinner.classList.add("hidden");
+            if (btnText) btnText.innerText = "অর্ডার নিশ্চিত করুন (৳" + Math.max(0, baseAmount - promoDiscountAmount) + ")";
+            if (errBox) {
+              errBox.innerText = data.error || "অর্ডার সম্পন্ন হতে ব্যর্থ হয়েছে। পুনরায় চেষ্টা করুন।";
+              errBox.classList.remove("hidden");
+            }
+          }
+        }).catch(function(err){
+          if (submitBtn) submitBtn.disabled = false;
+          if (spinner) spinner.classList.add("hidden");
+          if (btnText) btnText.innerText = "অর্ডার নিশ্চিত করুন";
+          if (errBox) {
+            errBox.innerText = "সার্ভার সংযোগে সমস্যা দেখা দিয়েছে। আপনার ইন্টারনেট চেক করুন।";
+            errBox.classList.remove("hidden");
+          }
+        });
+    });
+  </script>
+  ${renderFloatingAIChatbotHtml()}
+</body>
+</html>`;
+
+        return new Response(checkoutHtml, {
+          status: 200,
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+            "CDN-Cache-Control": "no-cache, no-store, must-revalidate, max-age=0"
+          }
+        });
       }
     }
 
@@ -2097,5 +3582,17 @@ ${context}
     // Static Assets & Next.js Pages Fallback
     // -------------------------------------------------------------
     return env.ASSETS.fetch(request);
+  },
+
+  // -------------------------------------------------------------
+  // Cloudflare Scheduled Daily Cron Event (Subscription Reminders)
+  // -------------------------------------------------------------
+  async scheduled(event, env, ctx) {
+    if (ctx && ctx.waitUntil) {
+      ctx.waitUntil(runSubscriptionReminderCron(env));
+    } else {
+      await runSubscriptionReminderCron(env);
+    }
   }
 };
+

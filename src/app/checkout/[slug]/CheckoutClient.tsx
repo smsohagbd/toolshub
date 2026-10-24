@@ -47,6 +47,21 @@ export function CheckoutClient({ slug }: { slug: string }) {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
+  const [fieldErrors, setFieldErrors] = useState<{
+    name?: string;
+    email?: string;
+    phone?: string;
+    password?: string;
+    sender?: string;
+    transactionId?: string;
+  }>({});
+
+  const isCrypto = Boolean(
+    selectedGateway?.type === "crypto" ||
+    selectedGateway?.id === "crypto" ||
+    selectedGateway?.title?.toLowerCase().includes("crypto") ||
+    selectedGateway?.title?.toLowerCase().includes("usdt")
+  );
 
   // Promo Code State
   const [couponCode, setCouponCode] = useState("");
@@ -71,22 +86,28 @@ export function CheckoutClient({ slug }: { slug: string }) {
           fetch(`/api/products`),
           fetch(`/api/payment-methods`)
         ]);
-        const prodData = await prodRes.json();
         const gwData = await gwRes.json();
+        let matched = null;
+        try {
+          const singleRes = await fetch(`/api/products/${encodeURIComponent(currentSlug)}`);
+          if (singleRes.ok) {
+            const singleData = await singleRes.json();
+            if (singleData.success && singleData.product) {
+              matched = singleData.product;
+            }
+          }
+        } catch(e) {}
 
-        const allProds = prodData.products || [];
-        // Match by slug, decoded slug, or product ID
-        let matched = allProds.find(
-          (p: any) =>
-            p.slug === currentSlug ||
-            p.id === currentSlug ||
-            decodeURIComponent(p.slug) === currentSlug ||
-            p.slug?.toLowerCase().trim() === currentSlug?.toLowerCase().trim()
-        );
-
-        if (!matched && currentSlug) {
-          const decoded = decodeURIComponent(currentSlug).toLowerCase().trim();
-          matched = allProds.find((p: any) => p.slug?.toLowerCase().trim() === decoded);
+        if (!matched) {
+          const prodData = await prodRes.json();
+          const allProds = prodData.products || [];
+          matched = allProds.find(
+            (p: any) =>
+              p.slug === currentSlug ||
+              p.id === currentSlug ||
+              decodeURIComponent(p.slug) === currentSlug ||
+              p.slug?.toLowerCase().trim() === currentSlug?.toLowerCase().trim()
+          );
         }
 
         setProduct(matched || null);
@@ -178,15 +199,35 @@ export function CheckoutClient({ slug }: { slug: string }) {
     e.preventDefault();
     setErrorMsg("");
 
-    if (!customerName || !customerEmail || !transactionId) {
-      setErrorMsg("অনুগ্রহ করে আপনার নাম, ইমেইল এবং Transaction ID প্রদান করুন।");
-      return;
+    const errors: typeof fieldErrors = {};
+    if (!customerName.trim()) {
+      errors.name = "আপনার পুরো নাম প্রদান করুন";
+    }
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!customerEmail.trim() || !emailRegex.test(customerEmail.trim())) {
+      errors.email = "সঠিক ইমেইল ঠিকানা দিন (ফাইল ও ডেলিভারি যাবে)";
+    }
+    if (!customerPhone.trim() || customerPhone.trim().length < 6) {
+      errors.phone = "সঠিক মোবাইল অথবা হোয়াটসঅ্যাপ নম্বর দিন";
+    }
+    if (!isLoggedIn && (!customerPassword || customerPassword.length < 6)) {
+      errors.password = "কমপক্ষে ৬ অক্ষরের পাসওয়ার্ড দিন";
+    }
+    if (!isCrypto && !senderNumber.trim()) {
+      errors.sender = "যে বিকাশ/নগদ নম্বর থেকে টাকা পাঠিয়েছেন তা লিখুন";
+    }
+    if (!transactionId.trim()) {
+      errors.transactionId = isCrypto
+        ? "ক্রিপ্টো Transaction Hash / TXID প্রদান করুন"
+        : "পেমেন্টের Transaction ID (TrxID) প্রদান করুন";
     }
 
-    if (!isLoggedIn && (!customerPassword || customerPassword.length < 6)) {
-      setErrorMsg("অ্যাকাউন্ট তৈরির জন্য অনুগ্রহ করে কমপক্ষে ৬ অক্ষরের একটি পাসওয়ার্ড দিন।");
+    if (Object.keys(errors).length > 0) {
+      setFieldErrors(errors);
+      setErrorMsg("অনুগ্রহ করে লাল চিহ্নিত আবশ্যক তথ্যগুলো পূরণ করুন।");
       return;
     }
+    setFieldErrors({});
 
     setIsLoading(true);
 
@@ -242,7 +283,7 @@ export function CheckoutClient({ slug }: { slug: string }) {
   }
 
   return (
-    <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-12 space-y-8">
+    <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-12 space-y-8 pb-24 sm:pb-12">
       {/* Back button */}
       <div>
         <Link
@@ -283,12 +324,21 @@ export function CheckoutClient({ slug }: { slug: string }) {
                     </label>
                     <input
                       type="text"
-                      required
                       value={customerName}
-                      onChange={(e) => setCustomerName(e.target.value)}
+                      onChange={(e) => {
+                        setCustomerName(e.target.value);
+                        if (fieldErrors.name) setFieldErrors(prev => ({ ...prev, name: undefined }));
+                      }}
                       placeholder="e.g. হাসান মাহমুদ"
-                      className="w-full px-3.5 py-2.5 text-sm rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      className={`w-full px-3.5 py-2.5 text-sm rounded-xl bg-slate-50 dark:bg-slate-800 border transition-all focus:outline-none focus:ring-2 ${
+                        fieldErrors.name
+                          ? "border-red-500 ring-2 ring-red-500/20 bg-red-50/50 dark:bg-red-950/20"
+                          : "border-slate-200 dark:border-slate-700 focus:ring-indigo-500"
+                      }`}
                     />
+                    {fieldErrors.name && (
+                      <p className="text-xs text-red-500 font-semibold mt-1">⚠️ {fieldErrors.name}</p>
+                    )}
                   </div>
 
                   <div>
@@ -297,26 +347,45 @@ export function CheckoutClient({ slug }: { slug: string }) {
                     </label>
                     <input
                       type="email"
-                      required
                       value={customerEmail}
-                      onChange={(e) => setCustomerEmail(e.target.value)}
+                      onChange={(e) => {
+                        setCustomerEmail(e.target.value);
+                        if (fieldErrors.email) setFieldErrors(prev => ({ ...prev, email: undefined }));
+                      }}
                       placeholder="name@example.com"
-                      className="w-full px-3.5 py-2.5 text-sm rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      className={`w-full px-3.5 py-2.5 text-sm rounded-xl bg-slate-50 dark:bg-slate-800 border transition-all focus:outline-none focus:ring-2 ${
+                        fieldErrors.email
+                          ? "border-red-500 ring-2 ring-red-500/20 bg-red-50/50 dark:bg-red-950/20"
+                          : "border-slate-200 dark:border-slate-700 focus:ring-indigo-500"
+                      }`}
                     />
+                    {fieldErrors.email && (
+                      <p className="text-xs text-red-500 font-semibold mt-1">⚠️ {fieldErrors.email}</p>
+                    )}
                   </div>
                 </div>
 
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                    মোবাইল / WhatsApp নম্বর
+                    মোবাইল / WhatsApp নম্বর *
                   </label>
                   <input
                     type="tel"
                     value={customerPhone}
-                    onChange={(e) => setCustomerPhone(e.target.value)}
+                    onChange={(e) => {
+                      setCustomerPhone(e.target.value);
+                      if (fieldErrors.phone) setFieldErrors(prev => ({ ...prev, phone: undefined }));
+                    }}
                     placeholder="017xxxxxxxx"
-                    className="w-full px-3.5 py-2.5 text-sm rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    className={`w-full px-3.5 py-2.5 text-sm rounded-xl bg-slate-50 dark:bg-slate-800 border transition-all focus:outline-none focus:ring-2 ${
+                      fieldErrors.phone
+                        ? "border-red-500 ring-2 ring-red-500/20 bg-red-50/50 dark:bg-red-950/20"
+                        : "border-slate-200 dark:border-slate-700 focus:ring-indigo-500"
+                    }`}
                   />
+                  {fieldErrors.phone && (
+                    <p className="text-xs text-red-500 font-semibold mt-1">⚠️ {fieldErrors.phone}</p>
+                  )}
                 </div>
 
                 {/* Password field for guest auto-account creation */}
@@ -332,13 +401,21 @@ export function CheckoutClient({ slug }: { slug: string }) {
                     </div>
                     <input
                       type="password"
-                      required
-                      minLength={6}
                       value={customerPassword}
-                      onChange={(e) => setCustomerPassword(e.target.value)}
+                      onChange={(e) => {
+                        setCustomerPassword(e.target.value);
+                        if (fieldErrors.password) setFieldErrors(prev => ({ ...prev, password: undefined }));
+                      }}
                       placeholder="কমপক্ষে ৬ অক্ষরের পাসওয়ার্ড দিন"
-                      className="w-full px-3.5 py-2.5 text-sm rounded-xl bg-white dark:bg-slate-800 border border-indigo-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      className={`w-full px-3.5 py-2.5 text-sm rounded-xl bg-white dark:bg-slate-800 border transition-all focus:outline-none focus:ring-2 ${
+                        fieldErrors.password
+                          ? "border-red-500 ring-2 ring-red-500/20 bg-red-50/50 dark:bg-red-950/20"
+                          : "border-indigo-200 dark:border-slate-700 focus:ring-indigo-500"
+                      }`}
                     />
+                    {fieldErrors.password && (
+                      <p className="text-xs text-red-500 font-semibold mt-1">⚠️ {fieldErrors.password}</p>
+                    )}
                     <p className="text-[11px] text-slate-600 dark:text-slate-300 leading-relaxed">
                       💡 <strong>সুবিধা:</strong> এই ইমেইল ও পাসওয়ার্ড দিয়ে অবিলম্বে একটি কাস্টমার অ্যাকাউন্ট তৈরি হবে, যাতে পরবর্তীতে ড্যাশবোর্ডে লগইন করে আপনার সব কোর্স ও ডাউনলোড সহজেই এক্সেস করতে পারেন।
                     </p>
@@ -394,14 +471,16 @@ export function CheckoutClient({ slug }: { slug: string }) {
                   <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700 space-y-3">
                     <div className="flex items-center justify-between flex-wrap gap-2">
                       <span className="text-xs font-semibold text-slate-600 dark:text-slate-300">
-                        {selectedGateway.title} নম্বর / অ্যাড্রেস ({selectedGateway.account_type}):
+                        {isCrypto
+                          ? "নির্ধারিত USDT ওয়ালেট অ্যাড্রেস (TRC20 / BEP20):"
+                          : `${selectedGateway.title} নম্বর / অ্যাড্রেস (${selectedGateway.account_type}):`}
                       </span>
                       <div className="flex items-center gap-1.5 bg-white dark:bg-slate-900 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 font-mono text-xs font-bold text-indigo-600 dark:text-indigo-400">
-                        <span>{selectedGateway.account_number}</span>
+                        <span className="break-all">{selectedGateway.account_number}</span>
                         <button
                           type="button"
                           onClick={() => copyToClipboard(selectedGateway.account_number)}
-                          className="hover:opacity-75 transition-opacity ml-1"
+                          className="hover:opacity-75 transition-opacity ml-1 shrink-0"
                           title="Copy"
                         >
                           {copied ? (
@@ -429,29 +508,50 @@ export function CheckoutClient({ slug }: { slug: string }) {
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
                     <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                      যে নম্বর বা ওয়ালেট থেকে পাঠিয়েছেন
+                      {isCrypto
+                        ? "আপনার ক্রিপ্টো প্রেরক ওয়ালেট অ্যাড্রেস (ঐচ্ছিক)"
+                        : "যে বিকাশ / নগদ নম্বর থেকে টাকা পাঠিয়েছেন *"}
                     </label>
                     <input
                       type="text"
                       value={senderNumber}
-                      onChange={(e) => setSenderNumber(e.target.value)}
-                      placeholder="e.g. 017xxxxxxxx বা Wallet"
-                      className="w-full px-3.5 py-2.5 text-sm rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      onChange={(e) => {
+                        setSenderNumber(e.target.value);
+                        if (fieldErrors.sender) setFieldErrors(prev => ({ ...prev, sender: undefined }));
+                      }}
+                      placeholder={isCrypto ? "যেমন: T... বা 0x... (ঐচ্ছিক)" : "017xxxxxxxx"}
+                      className={`w-full px-3.5 py-2.5 text-sm rounded-xl bg-slate-50 dark:bg-slate-800 border transition-all focus:outline-none focus:ring-2 ${
+                        fieldErrors.sender
+                          ? "border-red-500 ring-2 ring-red-500/20 bg-red-50/50 dark:bg-red-950/20"
+                          : "border-slate-200 dark:border-slate-700 focus:ring-indigo-500"
+                      }`}
                     />
+                    {fieldErrors.sender && (
+                      <p className="text-xs text-red-500 font-semibold mt-1">⚠️ {fieldErrors.sender}</p>
+                    )}
                   </div>
 
                   <div>
                     <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                      Transaction ID (TrxID / Hash) *
+                      {isCrypto ? "Transaction Hash / TXID *" : "Transaction ID (TrxID) *"}
                     </label>
                     <input
                       type="text"
-                      required
                       value={transactionId}
-                      onChange={(e) => setTransactionId(e.target.value)}
-                      placeholder="e.g. 9K8J7H6G5F বা TxHash"
-                      className="w-full px-3.5 py-2.5 text-sm rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono"
+                      onChange={(e) => {
+                        setTransactionId(e.target.value);
+                        if (fieldErrors.transactionId) setFieldErrors(prev => ({ ...prev, transactionId: undefined }));
+                      }}
+                      placeholder={isCrypto ? "যেমন: 7f8a9b3c4d... (TXID)" : "যেমন: 9K8J7H6G5F"}
+                      className={`w-full px-3.5 py-2.5 text-sm rounded-xl bg-slate-50 dark:bg-slate-800 border transition-all focus:outline-none focus:ring-2 font-mono ${
+                        fieldErrors.transactionId
+                          ? "border-red-500 ring-2 ring-red-500/20 bg-red-50/50 dark:bg-red-950/20"
+                          : "border-slate-200 dark:border-slate-700 focus:ring-indigo-500"
+                      }`}
                     />
+                    {fieldErrors.transactionId && (
+                      <p className="text-xs text-red-500 font-semibold mt-1">⚠️ {fieldErrors.transactionId}</p>
+                    )}
                   </div>
                 </div>
               </div>
@@ -629,6 +729,34 @@ export function CheckoutClient({ slug }: { slug: string }) {
             </div>
           </div>
         </div>
+      </div>
+
+      {/* Mobile Sticky Checkout CTA Bar */}
+      <div className="sm:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-t border-slate-200 dark:border-slate-800 px-4 py-3 shadow-[0_-8px_25px_rgba(0,0,0,0.12)] flex items-center justify-between gap-3">
+        <div>
+          <span className="text-[11px] text-slate-500 dark:text-slate-400 block font-medium">মোট প্রদেয়:</span>
+          <div className="text-xl font-black text-indigo-600 dark:text-indigo-400">
+            ৳{finalPayable}
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={handleOrderSubmit}
+          disabled={isLoading}
+          className="flex-1 py-3 px-5 rounded-2xl bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white font-extrabold text-sm shadow-lg shadow-indigo-600/30 flex items-center justify-center gap-1.5 transition-all disabled:opacity-50"
+        >
+          {isLoading ? (
+            <>
+              <Loader2 className="w-4 h-4 animate-spin" />
+              <span>প্রসেসিং...</span>
+            </>
+          ) : (
+            <>
+              <span>অর্ডার নিশ্চিত করুন</span>
+              <ArrowRight className="w-4 h-4" />
+            </>
+          )}
+        </button>
       </div>
     </div>
   );

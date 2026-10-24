@@ -17,8 +17,15 @@ CREATE TABLE IF NOT EXISTS settings (
   usd_rate REAL DEFAULT 120.0,
   
   -- Customizable Header & Footer JSON
-  header_nav_json TEXT DEFAULT '[{"label":"হোম","url":"/"},{"label":"টুলস","url":"/#tools"},{"label":"ফিচার","url":"/#features"},{"label":"অর্ডার ট্র্যাকিং","url":"/track-order"},{"label":"যোগাযোগ","url":"/#contact"}]',
+  header_nav_json TEXT DEFAULT '[{"label":"হোম","url":"/"},{"label":"টুলস","url":"/#tools"},{"label":"ফিচার","url":"/#features"},{"label":"অর্ডার ট্র্যাকিং","url":"/track-order"},{"label":"যোগাযোগ","url":"/contact"}]',
   footer_nav_json TEXT DEFAULT '{"copyright":"© 2026 ToolsHub BD. All rights reserved. Built for speed on Cloudflare Workers.","support_email":"support@sohag.com.bd","support_phone":"+880 1700-000000","telegram_link":"https://t.me/sohag","facebook_link":"https://facebook.com/sohag"}',
+  
+  -- Page Content JSON & Support Channels
+  homepage_json TEXT DEFAULT NULL,
+  chatbot_faqs_json TEXT DEFAULT NULL,
+  whatsapp_number TEXT DEFAULT '+8801700000000',
+  telegram_channel TEXT DEFAULT 'toolshubbd',
+  contact_page_json TEXT DEFAULT NULL,
   
   -- Custom Header & Footer Code Injection (Scripts, CSS, Analytics)
   header_code TEXT DEFAULT '<!-- Header Custom Scripts / GTM / Meta Tags -->',
@@ -54,6 +61,8 @@ CREATE TABLE IF NOT EXISTS users (
   email TEXT UNIQUE NOT NULL,
   password_hash TEXT NOT NULL,
   role TEXT DEFAULT 'customer', -- 'customer', 'admin'
+  reset_otp_code TEXT,
+  reset_otp_expires_at DATETIME,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );

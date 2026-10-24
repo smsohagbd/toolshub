@@ -15,20 +15,78 @@ import {
   LifeBuoy,
   ShieldCheck,
   LogIn,
-  Ticket
+  Ticket,
+  MapPin,
+  HelpCircle,
+  Info,
+  Headphones,
+  Sparkles
 } from "lucide-react";
+import { ContactPageData } from "@/lib/types";
+
+const defaultContactData: ContactPageData = {
+  badge_text: "২৪/৭ কাস্টমার সাপোর্ট",
+  title: "যোগাযোগ ও হেল্প ডেস্ক",
+  subtitle:
+    "যেকোনো প্রোডাক্ট সম্পর্কিত জিজ্ঞাসা, পেমেন্ট ভেরিফিকেশন বা টেকনিক্যাল সমস্যার তাৎক্ষণিক সমাধানের জন্য আমাদের সাথে যোগাযোগ করুন।",
+  notice_banner: {
+    enabled: false,
+    text: "জরুরী প্রয়োজনে সরাসরি আমাদের WhatsApp বা হটলাইনে যোগাযোগ করার অনুরোধ করা হচ্ছে।",
+    type: "info"
+  },
+  whatsapp: {
+    enabled: true,
+    title: "হোয়াটসঅ্যাপ সাপোর্ট",
+    description:
+      "যেকোনো প্রোডাক্টের লাইভ ডেমো, অর্ডার তথ্য বা দ্রুত সহায়তার জন্য সরাসরি WhatsApp-এ বার্তা পাঠান।",
+    number: "+8801700000000",
+    button_text: "সরাসরি WhatsApp-এ চ্যাট করুন",
+    prefill_text: "Hello ToolsHub BD support, I have an inquiry."
+  },
+  telegram: {
+    enabled: true,
+    title: "টেলিগ্রাম সাপোর্ট ও চ্যানেল",
+    description:
+      "আমাদের টেলিগ্রাম চ্যানেলে যুক্ত হয়ে নতুন সব টুলসের আপডেট, অফার এবং সাপোর্ট এজেন্টের সাথে কথা বলুন।",
+    channel: "toolshubbd",
+    button_text: "টেলিগ্রামে মেসেজ দিন"
+  },
+  support_info: {
+    email: "support@sohag.com.bd",
+    phone: "+880 1700-000000",
+    hours: "প্রতিদিন সকাল ১০:০০ - রাত ১২:০০",
+    address: "ঢাকা, বাংলাদেশ"
+  },
+  ticket_section: {
+    guest_title: "ইতিমধ্যে ক্রয় করেছেন? টিকিট সাপোর্ট পান",
+    guest_desc:
+      "লগইন করা গ্রাহকরা সরাসরি আমাদের টিকিট সিস্টেমের মাধ্যমে দ্রুত সমাধান ও হিস্টোরি ট্র্যাকিং সুবিধা পান।",
+    guest_btn_text: "লগইন করে টিকিট খুলুন",
+    user_title: "নতুন সাপোর্ট টিকিট খুলুন",
+    response_guarantee: "গড়ে ৩০ মিনিটের মধ্যে রিপ্লাই"
+  },
+  faqs: [
+    {
+      q: "পেমেন্ট করার পর টুলস পেতে কতক্ষণ সময় লাগে?",
+      a: "বিকাশ বা নগদ দিয়ে ট্রানজেকশন আইডি দিয়ে অর্ডার প্লেস করার পর অ্যাডমিন ভেরিফাই করতেই (সাধারণত ৫-১৫ মিনিটের মধ্যে) ডাউনলোড লিংক সক্রিয় হয়ে যায়।"
+    },
+    {
+      q: "সাপোর্ট টিকিট কিভাবে কাজ করে?",
+      a: "আমাদের ওয়েবসাইটে একাউন্ট থাকলে সরাসরি কন্টাক্ট পেজ থেকে টিকিট খুলতে পারেন। অ্যাডমিন রিপ্লাই দিলে আপনার টিকিটে সরাসরি দেখতে পাবেন।"
+    },
+    {
+      q: "সরাসরি ফোন বা হোয়াটসঅ্যাপে কথা বলা যাবে?",
+      a: "হ্যাঁ, উল্লেখিত কাজের সময় আমাদের অফিসিয়াল হোয়াটসঅ্যাপ বা হেল্পলাইন নম্বরে সরাসরি যোগাযোগ করতে পারেন।"
+    }
+  ]
+};
 
 export default function ContactPage() {
   const [user, setUser] = useState<{ id: string; name: string; email: string } | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
 
-  // Settings state (WhatsApp, Telegram, etc.)
-  const [settings, setSettings] = useState<any>({
-    whatsapp_number: "+8801700000000",
-    telegram_channel: "toolshubbd",
-    support_phone: "+880 1700-000000",
-    support_email: "support@sohag.com.bd"
-  });
+  // Dynamic Contact Page Data from Admin CMS
+  const [contactData, setContactData] = useState<ContactPageData>(defaultContactData);
 
   // Ticket Form State
   const [subject, setSubject] = useState("");
@@ -58,12 +116,65 @@ export default function ContactPage() {
         setAuthLoading(false);
       }
 
-      // 2. Load Settings for WhatsApp / Telegram
+      // 2. Load Contact Page Configuration & Settings
       try {
         const sRes = await fetch("/api/admin/settings");
         const sData = await sRes.json();
         if (sData.settings) {
-          setSettings(sData.settings);
+          const s = sData.settings;
+          let parsedContact: any = null;
+          if (s.contact_page_json) {
+            try {
+              parsedContact =
+                typeof s.contact_page_json === "string"
+                  ? JSON.parse(s.contact_page_json)
+                  : s.contact_page_json;
+            } catch (err) {
+              console.error("Error parsing contact_page_json", err);
+            }
+          }
+
+          if (parsedContact) {
+            setContactData({
+              ...defaultContactData,
+              ...parsedContact,
+              whatsapp: {
+                ...defaultContactData.whatsapp,
+                number: s.whatsapp_number || parsedContact.whatsapp?.number || defaultContactData.whatsapp.number,
+                ...(parsedContact.whatsapp || {})
+              },
+              telegram: {
+                ...defaultContactData.telegram,
+                channel: s.telegram_channel || parsedContact.telegram?.channel || defaultContactData.telegram.channel,
+                ...(parsedContact.telegram || {})
+              },
+              support_info: {
+                ...defaultContactData.support_info,
+                ...(parsedContact.support_info || {})
+              },
+              ticket_section: {
+                ...defaultContactData.ticket_section,
+                ...(parsedContact.ticket_section || {})
+              },
+              notice_banner: {
+                ...defaultContactData.notice_banner,
+                ...(parsedContact.notice_banner || {})
+              },
+              faqs: Array.isArray(parsedContact.faqs) ? parsedContact.faqs : defaultContactData.faqs
+            });
+          } else {
+            setContactData((prev) => ({
+              ...prev,
+              whatsapp: {
+                ...prev.whatsapp,
+                number: s.whatsapp_number || prev.whatsapp.number
+              },
+              telegram: {
+                ...prev.telegram,
+                channel: s.telegram_channel || prev.telegram.channel
+              }
+            }));
+          }
         }
       } catch (e) {
         console.error("Settings load error:", e);
@@ -127,26 +238,44 @@ export default function ContactPage() {
   };
 
   // Clean WhatsApp number for wa.me link
-  const rawWa = (settings.whatsapp_number || "8801700000000").replace(/[^0-9]/g, "");
-  const waUrl = `https://wa.me/${rawWa.startsWith("88") ? rawWa : "88" + rawWa}`;
-  const tgHandle = (settings.telegram_channel || "toolshubbd").replace("@", "");
+  const rawWa = (contactData.whatsapp.number || "8801700000000").replace(/[^0-9]/g, "");
+  const waUrl = `https://wa.me/${rawWa.startsWith("88") ? rawWa : "88" + rawWa}${
+    contactData.whatsapp.prefill_text ? `?text=${encodeURIComponent(contactData.whatsapp.prefill_text)}` : ""
+  }`;
+  const tgHandle = (contactData.telegram.channel || "toolshubbd").replace("@", "");
   const tgUrl = `https://t.me/${tgHandle}`;
 
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-12 sm:py-16 space-y-10">
-      {/* Page Title */}
+      {/* Page Title & Header */}
       <div className="text-center space-y-3">
         <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800">
           <LifeBuoy className="w-3.5 h-3.5" />
-          ২৪/৭ কাস্টমার সাপোর্ট
+          {contactData.badge_text || "২৪/৭ কাস্টমার সাপোর্ট"}
         </div>
         <h1 className="text-2xl sm:text-4xl font-extrabold text-slate-900 dark:text-white tracking-tight">
-          যোগাযোগ ও হেল্প ডেস্ক
+          {contactData.title || "যোগাযোগ ও হেল্প ডেস্ক"}
         </h1>
-        <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 max-w-lg mx-auto">
-          যেকোনো প্রোডাক্ট সম্পর্কিত জিজ্ঞাসা, পেমেন্ট ভেরিফিকেশন বা টেকনিক্যাল সমস্যার তাৎক্ষণিক সমাধানের জন্য আমাদের সাথে যোগাযোগ করুন।
+        <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 max-w-xl mx-auto">
+          {contactData.subtitle}
         </p>
       </div>
+
+      {/* Notice Banner (If enabled by admin) */}
+      {contactData.notice_banner?.enabled && contactData.notice_banner.text && (
+        <div
+          className={`p-4 rounded-2xl text-xs sm:text-sm flex items-center gap-3 border shadow-sm ${
+            contactData.notice_banner.type === "warning"
+              ? "bg-amber-50 dark:bg-amber-950/40 border-amber-200 dark:border-amber-800 text-amber-900 dark:text-amber-200"
+              : contactData.notice_banner.type === "success"
+              ? "bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-800 text-emerald-900 dark:text-emerald-200"
+              : "bg-indigo-50 dark:bg-indigo-950/40 border-indigo-200 dark:border-indigo-800 text-indigo-900 dark:text-indigo-200"
+          }`}
+        >
+          <Info className="w-5 h-5 shrink-0" />
+          <span className="font-medium">{contactData.notice_banner.text}</span>
+        </div>
+      )}
 
       {authLoading ? (
         <div className="py-16 flex items-center justify-center">
@@ -161,16 +290,23 @@ export default function ContactPage() {
             {/* Create Ticket Form */}
             <div className="lg:col-span-7 space-y-6">
               <div className="p-6 sm:p-8 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm space-y-6">
-                <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800 gap-2">
                   <div className="flex items-center gap-2">
-                    <div className="w-8 h-8 rounded-xl bg-indigo-600 text-white flex items-center justify-center">
+                    <div className="w-8 h-8 rounded-xl bg-indigo-600 text-white flex items-center justify-center shadow-md shadow-indigo-600/25">
                       <Ticket className="w-4 h-4" />
                     </div>
-                    <h2 className="text-base sm:text-lg font-extrabold text-slate-900 dark:text-white">
-                      নতুন সাপোর্ট টিকিট খুলুন
-                    </h2>
+                    <div>
+                      <h2 className="text-base sm:text-lg font-extrabold text-slate-900 dark:text-white">
+                        {contactData.ticket_section.user_title || "নতুন সাপোর্ট টিকিট খুলুন"}
+                      </h2>
+                      {contactData.ticket_section.response_guarantee && (
+                        <span className="text-[10px] text-indigo-600 dark:text-indigo-400 font-semibold">
+                          ⚡ {contactData.ticket_section.response_guarantee}
+                        </span>
+                      )}
+                    </div>
                   </div>
-                  <span className="text-[11px] font-semibold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/60 px-2.5 py-0.5 rounded-full">
+                  <span className="text-[11px] font-semibold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/60 px-2.5 py-0.5 rounded-full self-start sm:self-auto">
                     লগইন ইউজার: {user.name}
                   </span>
                 </div>
@@ -234,7 +370,7 @@ export default function ContactPage() {
                   <button
                     type="submit"
                     disabled={ticketSubmitting}
-                    className="w-full py-3.5 px-6 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-bold text-sm shadow-md transition-all flex items-center justify-center gap-2"
+                    className="w-full py-3.5 px-6 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-bold text-sm shadow-md transition-all flex items-center justify-center gap-2 hover:scale-[1.01]"
                   >
                     {ticketSubmitting ? (
                       <>
@@ -263,41 +399,67 @@ export default function ContactPage() {
                 </p>
 
                 <div className="space-y-3 pt-2">
-                  <a
-                    href={waUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center justify-between p-3.5 rounded-2xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-300 hover:scale-[1.02] transition-transform"
-                  >
-                    <div className="flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-xl bg-emerald-500 text-white flex items-center justify-center font-bold">
-                        WA
+                  {contactData.whatsapp.enabled && (
+                    <a
+                      href={waUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center justify-between p-3.5 rounded-2xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-300 hover:scale-[1.02] transition-transform"
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="w-8 h-8 rounded-xl bg-emerald-500 text-white flex items-center justify-center font-bold">
+                          WA
+                        </div>
+                        <div>
+                          <div className="text-xs font-bold">{contactData.whatsapp.title}</div>
+                          <div className="text-[11px] font-mono">{contactData.whatsapp.number}</div>
+                        </div>
                       </div>
-                      <div>
-                        <div className="text-xs font-bold">WhatsApp চ্যাট</div>
-                        <div className="text-[11px] font-mono">{settings.whatsapp_number || "+8801700000000"}</div>
-                      </div>
-                    </div>
-                    <ExternalLink className="w-4 h-4" />
-                  </a>
+                      <ExternalLink className="w-4 h-4" />
+                    </a>
+                  )}
 
-                  <a
-                    href={tgUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center justify-between p-3.5 rounded-2xl bg-sky-50 dark:bg-sky-950/40 border border-sky-200 dark:border-sky-800 text-sky-800 dark:text-sky-300 hover:scale-[1.02] transition-transform"
-                  >
-                    <div className="flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-xl bg-sky-500 text-white flex items-center justify-center font-bold">
-                        TG
+                  {contactData.telegram.enabled && (
+                    <a
+                      href={tgUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center justify-between p-3.5 rounded-2xl bg-sky-50 dark:bg-sky-950/40 border border-sky-200 dark:border-sky-800 text-sky-800 dark:text-sky-300 hover:scale-[1.02] transition-transform"
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="w-8 h-8 rounded-xl bg-sky-500 text-white flex items-center justify-center font-bold">
+                          TG
+                        </div>
+                        <div>
+                          <div className="text-xs font-bold">{contactData.telegram.title}</div>
+                          <div className="text-[11px] font-mono">@{tgHandle}</div>
+                        </div>
                       </div>
-                      <div>
-                        <div className="text-xs font-bold">টেলিগ্রাম চ্যানেল</div>
-                        <div className="text-[11px] font-mono">@{tgHandle}</div>
+                      <ExternalLink className="w-4 h-4" />
+                    </a>
+                  )}
+
+                  {/* Hotline & Email Info */}
+                  <div className="pt-3 border-t border-slate-200 dark:border-slate-800 space-y-2 text-xs text-slate-600 dark:text-slate-400">
+                    {contactData.support_info.phone && (
+                      <div className="flex items-center gap-2">
+                        <Phone className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                        <span>হটলাইন: <strong className="text-slate-800 dark:text-slate-200">{contactData.support_info.phone}</strong></span>
                       </div>
-                    </div>
-                    <ExternalLink className="w-4 h-4" />
-                  </a>
+                    )}
+                    {contactData.support_info.email && (
+                      <div className="flex items-center gap-2">
+                        <Mail className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+                        <span>ইমেইল: <strong className="text-slate-800 dark:text-slate-200">{contactData.support_info.email}</strong></span>
+                      </div>
+                    )}
+                    {contactData.support_info.hours && (
+                      <div className="flex items-center gap-2">
+                        <Clock className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                        <span>সময়: {contactData.support_info.hours}</span>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>
@@ -384,68 +546,134 @@ export default function ContactPage() {
         </div>
       ) : (
         /* ============================================================== */
-        /* GUEST / NORMAL USER: WHATSAPP + TELEGRAM DIRECT CARDS          */
+        /* GUEST / NORMAL USER: DIRECT SUPPORT CARDS & TICKETING PROMPT   */
         /* ============================================================== */
-        <div className="space-y-8">
+        <div className="space-y-10">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             {/* WhatsApp Card */}
-            <div className="p-6 sm:p-8 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm hover:shadow-xl transition-all duration-300 flex flex-col justify-between space-y-6">
-              <div className="space-y-4">
-                <div className="w-14 h-14 rounded-2xl bg-emerald-500 text-white flex items-center justify-center text-xl font-bold shadow-lg shadow-emerald-500/20">
-                  WA
+            {contactData.whatsapp.enabled && (
+              <div className="p-6 sm:p-8 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm hover:shadow-xl transition-all duration-300 flex flex-col justify-between space-y-6 group">
+                <div className="space-y-4">
+                  <div className="w-14 h-14 rounded-2xl bg-emerald-500 text-white flex items-center justify-center text-xl font-bold shadow-lg shadow-emerald-500/20 group-hover:scale-105 transition-transform">
+                    WA
+                  </div>
+                  <div>
+                    <h3 className="text-xl font-extrabold text-slate-900 dark:text-white">
+                      {contactData.whatsapp.title}
+                    </h3>
+                    <p className="text-xs sm:text-sm text-slate-500 mt-1">
+                      {contactData.whatsapp.description}
+                    </p>
+                  </div>
+                  <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800 font-mono text-sm font-bold text-slate-800 dark:text-slate-200">
+                    {contactData.whatsapp.number}
+                  </div>
                 </div>
-                <div>
-                  <h3 className="text-xl font-extrabold text-slate-900 dark:text-white">
-                    হোয়াটসঅ্যাপ সাপোর্ট
-                  </h3>
-                  <p className="text-xs sm:text-sm text-slate-500 mt-1">
-                    যেকোনো প্রোডাক্টের লাইভ ডেমো, অর্ডার তথ্য বা দ্রুত সহায়তার জন্য সরাসরি WhatsApp-এ বার্তা পাঠান।
-                  </p>
-                </div>
-                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800 font-mono text-sm font-bold text-slate-800 dark:text-slate-200">
-                  {settings.whatsapp_number || "+880 1700-000000"}
-                </div>
-              </div>
 
-              <a
-                href={waUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="w-full py-3.5 px-4 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-sm shadow-md transition-all flex items-center justify-center gap-2 hover:scale-[1.01] active:scale-[0.99]"
-              >
-                <span>সরাসরি WhatsApp-এ চ্যাট করুন</span>
-                <ExternalLink className="w-4 h-4" />
-              </a>
-            </div>
+                <a
+                  href={waUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="w-full py-3.5 px-4 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-sm shadow-md transition-all flex items-center justify-center gap-2 hover:scale-[1.01] active:scale-[0.99]"
+                >
+                  <span>{contactData.whatsapp.button_text}</span>
+                  <ExternalLink className="w-4 h-4" />
+                </a>
+              </div>
+            )}
 
             {/* Telegram Card */}
-            <div className="p-6 sm:p-8 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm hover:shadow-xl transition-all duration-300 flex flex-col justify-between space-y-6">
-              <div className="space-y-4">
-                <div className="w-14 h-14 rounded-2xl bg-sky-500 text-white flex items-center justify-center text-xl font-bold shadow-lg shadow-sky-500/20">
-                  TG
+            {contactData.telegram.enabled && (
+              <div className="p-6 sm:p-8 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm hover:shadow-xl transition-all duration-300 flex flex-col justify-between space-y-6 group">
+                <div className="space-y-4">
+                  <div className="w-14 h-14 rounded-2xl bg-sky-500 text-white flex items-center justify-center text-xl font-bold shadow-lg shadow-sky-500/20 group-hover:scale-105 transition-transform">
+                    TG
+                  </div>
+                  <div>
+                    <h3 className="text-xl font-extrabold text-slate-900 dark:text-white">
+                      {contactData.telegram.title}
+                    </h3>
+                    <p className="text-xs sm:text-sm text-slate-500 mt-1">
+                      {contactData.telegram.description}
+                    </p>
+                  </div>
+                  <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800 font-mono text-sm font-bold text-slate-800 dark:text-slate-200">
+                    @{tgHandle}
+                  </div>
                 </div>
-                <div>
-                  <h3 className="text-xl font-extrabold text-slate-900 dark:text-white">
-                    টেলিগ্রাম সাপোর্ট ও চ্যানেল
-                  </h3>
-                  <p className="text-xs sm:text-sm text-slate-500 mt-1">
-                    আমাদের টেলিগ্রাম চ্যানেলে যুক্ত হয়ে নতুন সব টুলসের আপডেট, অফার এবং সাপোর্ট এজেন্টের সাথে কথা বলুন।
-                  </p>
-                </div>
-                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800 font-mono text-sm font-bold text-slate-800 dark:text-slate-200">
-                  @{tgHandle}
-                </div>
-              </div>
 
-              <a
-                href={tgUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="w-full py-3.5 px-4 rounded-2xl bg-sky-600 hover:bg-sky-700 text-white font-bold text-sm shadow-md transition-all flex items-center justify-center gap-2 hover:scale-[1.01] active:scale-[0.99]"
-              >
-                <span>টেলিগ্রামে মেসেজ দিন</span>
-                <ExternalLink className="w-4 h-4" />
-              </a>
+                <a
+                  href={tgUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="w-full py-3.5 px-4 rounded-2xl bg-sky-600 hover:bg-sky-700 text-white font-bold text-sm shadow-md transition-all flex items-center justify-center gap-2 hover:scale-[1.01] active:scale-[0.99]"
+                >
+                  <span>{contactData.telegram.button_text}</span>
+                  <ExternalLink className="w-4 h-4" />
+                </a>
+              </div>
+            )}
+          </div>
+
+          {/* Direct Support Details (Email, Phone, Hours, Location) */}
+          <div className="p-6 rounded-3xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-indigo-100 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0">
+                <Mail className="w-5 h-5" />
+              </div>
+              <div className="space-y-0.5">
+                <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
+                  সাপোর্ট ইমেইল
+                </span>
+                <a
+                  href={`mailto:${contactData.support_info.email}`}
+                  className="font-bold text-xs sm:text-sm text-slate-800 dark:text-slate-200 hover:text-indigo-600 transition-colors break-all"
+                >
+                  {contactData.support_info.email}
+                </a>
+              </div>
+            </div>
+
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-emerald-100 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400 flex items-center justify-center shrink-0">
+                <Phone className="w-5 h-5" />
+              </div>
+              <div className="space-y-0.5">
+                <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
+                  হটলাইন নম্বর
+                </span>
+                <span className="font-bold text-xs sm:text-sm text-slate-800 dark:text-slate-200">
+                  {contactData.support_info.phone}
+                </span>
+              </div>
+            </div>
+
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-amber-100 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400 flex items-center justify-center shrink-0">
+                <Clock className="w-5 h-5" />
+              </div>
+              <div className="space-y-0.5">
+                <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
+                  সাপোর্ট কার্যসময়
+                </span>
+                <span className="font-bold text-xs sm:text-sm text-slate-800 dark:text-slate-200">
+                  {contactData.support_info.hours}
+                </span>
+              </div>
+            </div>
+
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-red-100 dark:bg-red-950/60 text-red-600 dark:text-red-400 flex items-center justify-center shrink-0">
+                <MapPin className="w-5 h-5" />
+              </div>
+              <div className="space-y-0.5">
+                <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
+                  হেড অফিস
+                </span>
+                <span className="font-bold text-xs sm:text-sm text-slate-800 dark:text-slate-200">
+                  {contactData.support_info.address}
+                </span>
+              </div>
             </div>
           </div>
 
@@ -454,10 +682,10 @@ export default function ContactPage() {
             <div className="space-y-1">
               <h4 className="font-extrabold text-base text-slate-900 dark:text-white flex items-center gap-2">
                 <Ticket className="w-4 h-4 text-indigo-600" />
-                ইতিমধ্যে ক্রয় করেছেন? টিকিট সাপোর্ট পান
+                {contactData.ticket_section.guest_title}
               </h4>
               <p className="text-xs text-slate-600 dark:text-slate-300">
-                লগইন করা গ্রাহকরা সরাসরি আমাদের টিকিট সিস্টেমের মাধ্যমে দ্রুত সমাধান ও হিস্টোরি ট্র্যাকিং সুবিধা পান।
+                {contactData.ticket_section.guest_desc}
               </p>
             </div>
 
@@ -466,9 +694,40 @@ export default function ContactPage() {
               className="inline-flex items-center justify-center gap-2 px-6 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-md transition-all shrink-0 hover:scale-105"
             >
               <LogIn className="w-4 h-4" />
-              লগইন করে টিকিট খুলুন
+              {contactData.ticket_section.guest_btn_text}
             </Link>
           </div>
+
+          {/* FAQs section if present */}
+          {contactData.faqs && contactData.faqs.length > 0 && (
+            <div className="space-y-4 pt-4">
+              <div className="text-center space-y-1">
+                <h3 className="text-lg sm:text-xl font-extrabold text-slate-900 dark:text-white flex items-center justify-center gap-2">
+                  <HelpCircle className="w-5 h-5 text-indigo-600" />
+                  সাধারণ কিছু জিজ্ঞাসা ও সমাধান
+                </h3>
+                <p className="text-xs text-slate-500">
+                  সাপোর্ট টিমের সাথে যোগাযোগের পূর্বে উত্তরগুলো দেখে নিতে পারেন
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-2">
+                {contactData.faqs.map((faq, idx) => (
+                  <div
+                    key={idx}
+                    className="p-5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm space-y-2 hover:border-indigo-500/50 transition-colors"
+                  >
+                    <h5 className="font-bold text-xs sm:text-sm text-slate-900 dark:text-white leading-snug">
+                      {faq.q}
+                    </h5>
+                    <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
+                      {faq.a}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>

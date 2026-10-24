@@ -24,7 +24,8 @@ import {
   Users,
   CalendarClock,
   Mail,
-  Tag
+  Tag,
+  Headphones
 } from "lucide-react";
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
@@ -84,6 +85,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   const navItems = [
     { label: "ড্যাশবোর্ড", href: "/admin", icon: LayoutDashboard },
     { label: "হোমপেজ ও কন্টেন্ট", href: "/admin/homepage", icon: Sliders },
+    { label: "যোগাযোগ পেজ", href: "/admin/contact", icon: Headphones },
     { label: "প্রোডাক্টস / টুলস", href: "/admin/products", icon: Package },
     { label: "মিডিয়া লাইব্রেরি", href: "/admin/media", icon: ImageIcon },
     { label: "অর্ডার ও ডেলিভারি", href: "/admin/orders", icon: ShoppingBag },

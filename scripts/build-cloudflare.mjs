@@ -84,7 +84,24 @@ fs.writeFileSync(path.join(distDir, "_routes.json"), JSON.stringify(routesJson, 
 const workerSrc = path.join(rootDir, "scripts", "worker.js");
 const workerDest = path.join(distDir, "_worker.js");
 if (fs.existsSync(workerSrc)) {
-  fs.copyFileSync(workerSrc, workerDest);
+  let workerContent = fs.readFileSync(workerSrc, "utf8");
+  
+  // Find compiled CSS filename
+  const cssDir = path.join(distDir, "_next", "static", "css");
+  let cssFile = "";
+  if (fs.existsSync(cssDir)) {
+    const cssFiles = fs.readdirSync(cssDir).filter(f => f.endsWith(".css"));
+    if (cssFiles.length > 0) {
+      cssFile = cssFiles[0];
+    }
+  }
+  
+  if (cssFile) {
+    workerContent = workerContent.replace(/__NEXT_CSS_FILE__/g, cssFile);
+    console.log(`✓ Injected compiled CSS asset: ${cssFile} into _worker.js`);
+  }
+
+  fs.writeFileSync(workerDest, workerContent, "utf8");
   console.log("✓ Copied standalone Cloudflare Edge Worker (scripts/worker.js -> dist/_worker.js)");
 } else {
   console.error("❌ Error: scripts/worker.js not found!");

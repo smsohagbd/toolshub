@@ -6,6 +6,13 @@ export const runtime = "edge";
 export async function GET() {
   try {
     const settings = await getSiteSettings();
+    if (settings) {
+      const safe = { ...settings };
+      delete (safe as any).admin_password_hash;
+      delete (safe as any).admin_otp_code;
+      delete (safe as any).admin_otp_expires_at;
+      return NextResponse.json({ settings: safe });
+    }
     return NextResponse.json({ settings });
   } catch (error) {
     return NextResponse.json({ error: "Failed to fetch settings" }, { status: 500 });
@@ -16,6 +23,13 @@ export async function PUT(req: NextRequest) {
   try {
     const body = await req.json();
     const db = getDB();
+
+    // Auto-create any missing columns in Cloudflare D1
+    try { await db.prepare("ALTER TABLE settings ADD COLUMN contact_page_json TEXT").run(); } catch (_) {}
+    try { await db.prepare("ALTER TABLE settings ADD COLUMN telegram_channel TEXT").run(); } catch (_) {}
+    try { await db.prepare("ALTER TABLE settings ADD COLUMN whatsapp_number TEXT").run(); } catch (_) {}
+    try { await db.prepare("ALTER TABLE settings ADD COLUMN homepage_json TEXT").run(); } catch (_) {}
+    try { await db.prepare("ALTER TABLE settings ADD COLUMN chatbot_faqs_json TEXT").run(); } catch (_) {}
 
     const current = await getSiteSettings();
 
@@ -39,7 +53,9 @@ export async function PUT(req: NextRequest) {
       ai_system_prompt: body.ai_system_prompt ?? current.ai_system_prompt,
       homepage_json: body.homepage_json !== undefined ? (typeof body.homepage_json === "string" ? body.homepage_json : JSON.stringify(body.homepage_json)) : ((current as any)?.homepage_json || null),
       chatbot_faqs_json: body.chatbot_faqs_json !== undefined ? (typeof body.chatbot_faqs_json === "string" ? body.chatbot_faqs_json : JSON.stringify(body.chatbot_faqs_json)) : ((current as any)?.chatbot_faqs_json || null),
-      whatsapp_number: body.whatsapp_number !== undefined ? body.whatsapp_number : ((current as any)?.whatsapp_number || "")
+      whatsapp_number: body.whatsapp_number !== undefined ? body.whatsapp_number : ((current as any)?.whatsapp_number || ""),
+      telegram_channel: body.telegram_channel !== undefined ? body.telegram_channel : ((current as any)?.telegram_channel || ""),
+      contact_page_json: body.contact_page_json !== undefined ? (typeof body.contact_page_json === "string" ? body.contact_page_json : JSON.stringify(body.contact_page_json)) : ((current as any)?.contact_page_json || null)
     };
 
     await db
@@ -65,6 +81,8 @@ export async function PUT(req: NextRequest) {
             homepage_json = ?,
             chatbot_faqs_json = ?,
             whatsapp_number = ?,
+            telegram_channel = ?,
+            contact_page_json = ?,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = 'general'
       `)
@@ -88,7 +106,9 @@ export async function PUT(req: NextRequest) {
         updated.ai_system_prompt,
         updated.homepage_json,
         updated.chatbot_faqs_json,
-        updated.whatsapp_number
+        updated.whatsapp_number,
+        updated.telegram_channel,
+        updated.contact_page_json
       )
       .run();
 

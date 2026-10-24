@@ -128,6 +128,30 @@ export default function AdminSubscriptionsPage() {
     (s) => s.status === "active" && s.days_remaining <= 7 && s.days_remaining > 0
   ).length;
 
+  const [cronLoading, setCronLoading] = useState(false);
+
+  const handleTriggerCron = async () => {
+    setCronLoading(true);
+    setMessage(null);
+    try {
+      const res = await fetch("/api/admin/subscriptions/trigger-cron", { method: "POST" });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setMessage({
+          type: "success",
+          text: data.message || `ক্রন সফলভাবে সম্পন্ন হয়েছে! ${data.notifications_sent || 0} টি ইমেইল রিমাইন্ডার পাঠানো হয়েছে।`
+        });
+        await fetchSubscriptions();
+      } else {
+        setMessage({ type: "error", text: data.error || "ক্রন চালাতে সমস্যা হয়েছে।" });
+      }
+    } catch {
+      setMessage({ type: "error", text: "সার্ভারে সংযোগ ব্যর্থ হয়েছে।" });
+    } finally {
+      setCronLoading(false);
+    }
+  };
+
   const getCycleBadge = (cycle: string) => {
     switch (cycle) {
       case "1_month":
@@ -159,13 +183,25 @@ export default function AdminSubscriptionsPage() {
           </p>
         </div>
 
-        <button
-          onClick={fetchSubscriptions}
-          className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-50 transition-all shadow-sm"
-        >
-          <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? "animate-spin" : ""}`} />
-          <span>রিফ্রেশ</span>
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleTriggerCron}
+            disabled={cronLoading}
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white transition-all shadow-md shadow-indigo-600/20 disabled:opacity-50"
+            title="প্রতিদিনের মতো আজ সাবস্ক্রিপশন রিমাইন্ডার ও মেয়াদোত্তীর্ণ ইমেইল পাঠান"
+          >
+            {cronLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <span>⚡</span>}
+            <span>{cronLoading ? "ক্রন চলছে..." : "রিমাইন্ডার ক্রন রান করুন"}</span>
+          </button>
+
+          <button
+            onClick={fetchSubscriptions}
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-50 transition-all shadow-sm"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? "animate-spin" : ""}`} />
+            <span>রিফ্রেশ</span>
+          </button>
+        </div>
       </div>
 
       {/* Feedback Message */}

@@ -297,6 +297,7 @@ export default function AdminAISettingsPage() {
                       }}
                       className="w-full px-3.5 py-2 text-xs rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 font-medium"
                     >
+                      <option value="google/gemini-3.8-flash">Google Gemini 3.8 Flash (সুপার ফাস্ট ও অ্যাকুরেট)</option>
                       <option value="minimax/minimax-m3.1-flash:free">Minimax M3.1 Flash (ফ্রি ও সুপারফাস্ট)</option>
                       <option value="google/gemini-2.0-flash-exp:free">Gemini 2.0 Flash (ফ্রি এক্সপেরিমেন্টাল)</option>
                       <option value="meta-llama/llama-3.3-70b-instruct:free">Llama 3.3 70B Instruct (ফ্রি ও বুদ্ধিমান)</option>
@@ -312,13 +313,14 @@ export default function AdminAISettingsPage() {
                       type="text"
                       value={aiModel}
                       onChange={(e) => setAiModel(e.target.value)}
-                      placeholder="যেকোনো OpenRouter মডেল ID লিখুন (e.g. meta-llama/llama-3.1-8b-instruct)"
+                      placeholder="যেকোনো OpenRouter মডেল ID লিখুন (e.g. google/gemini-3.8-flash)"
                       className="w-full px-3.5 py-2 text-xs font-mono rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
                     />
                   </div>
                   <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
                     <span className="text-[10px] text-slate-400 font-medium">ক্লিক করে সিলেক্ট করুন:</span>
                     {[
+                      { name: "Gemini 3.8 Flash", id: "google/gemini-3.8-flash" },
                       { name: "Minimax Free", id: "minimax/minimax-m3.1-flash:free" },
                       { name: "Gemini 2.0 Free", id: "google/gemini-2.0-flash-exp:free" },
                       { name: "Llama 3.3 Free", id: "meta-llama/llama-3.3-70b-instruct:free" },
